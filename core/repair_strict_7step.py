@@ -86,6 +86,25 @@ def get_instance_detail(project_code, instance_id):
     return False, {}, last_msg
 
 
+def get_instance_from_list(project_code, instance_id):
+    """详情接口失败时，回退到实例列表中按 ID 查状态，避免误判已启动实例"""
+    endpoints = [
+        f"/projects/{project_code}/workflow-instances?pageNo=1&pageSize=100&stateType=ALL",
+        f"/projects/{project_code}/process-instances?pageNo=1&pageSize=100&stateType=ALL",
+    ]
+    instance_id_str = str(instance_id)
+
+    for endpoint in endpoints:
+        success, data, msg = ds_api_get(endpoint)
+        if not success:
+            continue
+        items = data.get('totalList', [])
+        for item in items:
+            if str(item.get('id')) == instance_id_str:
+                return item
+    return {}
+
+
 def get_fuyan_name(workflow):
     return workflow.get('name') or workflow.get('workflow_name') or '未命名复验工作流'
 
@@ -669,6 +688,12 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
             
             # 查询实例状态
             success, data, msg = get_instance_detail(PROJECT_CODE, instance_id)
+            if (not success or not data) and item['fail_count'] < 2:
+                fallback_data = get_instance_from_list(PROJECT_CODE, instance_id)
+                if fallback_data:
+                    success = True
+                    data = fallback_data
+                    msg = ''
             
             if success and data:
                 state = data.get('state', 'UNKNOWN')

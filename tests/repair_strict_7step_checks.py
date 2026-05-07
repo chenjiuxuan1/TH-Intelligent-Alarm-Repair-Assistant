@@ -207,6 +207,46 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["workflow_code"], "wf-1")
         self.assertEqual(tasks[0]["task_code"], "task-1")
 
+    def test_step4_wait_and_check_falls_back_to_instance_list_when_detail_query_fails(self):
+        module = load_module()
+        running_instances = [
+            {
+                "table": "dwd_fox_mission_log",
+                "instance_id": 21595307329344,
+                "task": {
+                    "table": "dwd_fox_mission_log",
+                    "instance_id": 21595307329344,
+                    "status": "success",
+                },
+            }
+        ]
+
+        with mock.patch.object(
+            module,
+            "get_instance_detail",
+            side_effect=[
+                (False, {}, "query process instance by id error"),
+                (False, {}, "query process instance by id error"),
+            ],
+        ), mock.patch.object(
+            module,
+            "get_instance_from_list",
+            side_effect=[
+                {"id": 21595307329344, "state": "RUNNING_EXECUTION"},
+                {"id": 21595307329344, "state": "SUCCESS", "endTime": "2026-05-07 15:49:30"},
+            ],
+        ), mock.patch.object(module, "log"), mock.patch("time.sleep"):
+            completed_tasks, failed_tasks = module.step4_wait_and_check(
+                running_instances,
+                poll_interval=0,
+                max_wait=1,
+            )
+
+        self.assertEqual(len(completed_tasks), 1)
+        self.assertEqual(completed_tasks[0]["final_status"], "success")
+        self.assertEqual(completed_tasks[0]["end_time"], "2026-05-07 15:49:30")
+        self.assertEqual(failed_tasks, [])
+
     def test_resolve_repair_table_prefers_downstream_warehouse_layer_over_ods(self):
         module = load_module()
         row = {
