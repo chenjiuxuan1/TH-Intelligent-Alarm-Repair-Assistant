@@ -15,6 +15,13 @@ import os
 import json
 import argparse
 from datetime import datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config.config import WORKSPACE_CONFIG
+
+
+WORKSPACE_ROOT = WORKSPACE_CONFIG['root']
 
 # 任务配置
 TASKS = {
@@ -51,16 +58,20 @@ TASKS = {
 
 def check_script_exists(script_name):
     """检查脚本文件是否存在"""
-    script_path = f"/home/node/.openclaw/workspace/{script_name}"
+    script_path = os.path.join(WORKSPACE_ROOT, script_name)
     return os.path.exists(script_path)
 
 
 def check_script_syntax(script_name):
     """检查脚本语法是否正确"""
     import py_compile
-    script_path = f"/home/node/.openclaw/workspace/{script_name}"
+    script_path = os.path.join(WORKSPACE_ROOT, script_name)
     try:
-        py_compile.compile(script_path, doraise=True)
+        py_compile.compile(
+            script_path,
+            doraise=True,
+            cfile=os.path.join("/tmp", "task_execution_checker.pyc"),
+        )
         return True, None
     except Exception as e:
         return False, str(e)
@@ -78,7 +89,7 @@ def check_env_variables():
 
 def check_csv_file():
     """检查CSV文件"""
-    csv_path = "/home/node/.openclaw/workspace/dolphinscheduler/schedules_export.csv"
+    csv_path = os.path.join(WORKSPACE_ROOT, "dolphinscheduler", "schedules_export.csv")
     if not os.path.exists(csv_path):
         return False, "文件不存在"
     if os.path.getsize(csv_path) == 0:
