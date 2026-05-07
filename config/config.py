@@ -192,6 +192,11 @@ TABLE_CONFIG = {
 }
 
 
+REPAIR_CONFIG = {
+    "scan_lookback_days": int(_get_env("SCAN_LOOKBACK_DAYS", "7")),
+}
+
+
 FUYAN_WORKFLOWS = _load_fuyan_workflows()
 
 

@@ -31,6 +31,9 @@ def load_module():
         "quality_result_table": "default_quality_result",
         "quality_alert_table": "default_quality_alert",
     }
+    fake_config_config.REPAIR_CONFIG = {
+        "scan_lookback_days": 7,
+    }
     fake_config_config.FUYAN_WORKFLOWS = [
         {"name": "默认复验", "code": "wf-default", "level": "all"},
     ]
@@ -64,6 +67,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(module.FUYAN_PROJECT_CODE, "default-fuyan-project")
         self.assertEqual(module.DS_TOKEN, "default-token")
         self.assertEqual(module.MANUAL_REVIEW_STATE_FILE, "/tmp/default-workspace/auto_repair_records/manual_review_state.json")
+        self.assertEqual(module.SCAN_LOOKBACK_DAYS, 7)
         self.assertEqual(module.FUYAN_WORKFLOWS, [{"name": "默认复验", "code": "wf-default", "level": "all"}])
 
     def test_step5_execute_fuyan_accepts_workflow_name_style_config(self):
@@ -79,7 +83,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         ]
 
         with mock.patch.object(module, "ds_api_post", return_value=(True, {"data": [12345]}, "")):
-            results = module.step5_execute_fuyan([], [], [])
+            results = module.step5_execute_fuyan([{"table": "dwd_fox_mission_log"}], [], [])
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["name"], "每日复验全级别数据(W-1)")
@@ -100,7 +104,7 @@ class RepairStrict7StepTests(unittest.TestCase):
             return True, {"data": [len(started_codes)]}, ""
 
         with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
-            module.step5_execute_fuyan([], [], [{"table": "dwd_fox_mission_log"}])
+            module.step5_execute_fuyan([{"table": "dwd_fox_mission_log"}], [], [{"table": "dwd_fox_mission_log"}])
 
         self.assertEqual(started_codes, ["wf-daily", "wf-l3"])
 
@@ -118,7 +122,7 @@ class RepairStrict7StepTests(unittest.TestCase):
             return True, {"data": [len(started_codes)]}, ""
 
         with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
-            module.step5_execute_fuyan([], [], [{"table": "dwb_cash_audit"}])
+            module.step5_execute_fuyan([{"table": "dwb_cash_audit"}], [], [{"table": "dwb_cash_audit"}])
 
         self.assertEqual(started_codes, ["wf-daily", "wf-l1"])
 
@@ -385,6 +389,54 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         executed_sql = fake_cursor.execute.call_args[0][0]
         self.assertIn("FROM default_quality_result", executed_sql)
+        self.assertIn("INTERVAL 7 DAY", executed_sql)
+
+    def test_step5_execute_fuyan_skips_when_no_completed_repairs(self):
+        module = load_module()
+
+        with mock.patch.object(module, "ds_api_post") as mock_post, mock.patch.object(module, "log"):
+            results = module.step5_execute_fuyan([], [], [{"table": "dwd_fox_mission_log"}])
+
+        self.assertEqual(results, [])
+        mock_post.assert_not_called()
+
+    def test_main_skips_fuyan_when_no_repairs_were_started(self):
+        module = load_module()
+        alerts = [{"table": "dwd_fox_mission_log", "dt": "2026-04-29"}]
+        unresolved_tables = {"dwd_fox_mission_log"}
+
+        with mock.patch.object(module, "step1_scan_alerts", return_value=alerts), mock.patch.object(
+            module, "step2_find_locations", return_value=[{"table": "dwd_fox_mission_log", "dt": "2026-04-29"}]
+        ), mock.patch.object(
+            module, "load_manual_review_state", return_value={}
+        ), mock.patch.object(
+            module, "apply_repair_strategy", return_value=([{"table": "dwd_fox_mission_log", "dt": "2026-04-29"}], [])
+        ), mock.patch.object(
+            module, "execute_repairs_in_batches", return_value=([{"table": "dwd_fox_mission_log"}], [], [])
+        ), mock.patch.object(
+            module, "record_redundant_retry_attempt"
+        ), mock.patch.object(
+            module, "record_manual_review_tasks"
+        ), mock.patch.object(
+            module, "save_manual_review_state"
+        ), mock.patch.object(
+            module, "step5_execute_fuyan"
+        ) as mock_step5, mock.patch.object(
+            module, "evaluate_repair_outcome"
+        ) as mock_evaluate, mock.patch.object(
+            module, "get_remaining_alert_tables", return_value=unresolved_tables
+        ), mock.patch.object(
+            module, "step6_save_report"
+        ) as mock_step6, mock.patch.object(module, "log"):
+            module.main()
+
+        mock_step5.assert_not_called()
+        mock_evaluate.assert_not_called()
+        summary = mock_step6.call_args[0][4]
+        final_fuyan_results = mock_step6.call_args[0][3]
+        self.assertEqual(final_fuyan_results, [])
+        self.assertEqual(summary["remaining_count"], 1)
+        self.assertEqual(summary["resolved_count"], 0)
 
     def test_summarize_repair_outcome_uses_post_fuyan_remaining_tables(self):
         module = load_module()

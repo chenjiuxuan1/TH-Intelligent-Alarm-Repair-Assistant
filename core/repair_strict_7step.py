@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import auto_load_env
-from config.config import DS_CONFIG, FUYAN_WORKFLOWS, TABLE_CONFIG, WORKSPACE_CONFIG
+from config.config import DS_CONFIG, FUYAN_WORKFLOWS, REPAIR_CONFIG, TABLE_CONFIG, WORKSPACE_CONFIG
 
 import json
 import os
@@ -35,6 +35,7 @@ DS_ENVIRONMENT_CODE = DS_CONFIG['environment_code']
 DS_TENANT_CODE = DS_CONFIG['tenant_code']
 QUALITY_RESULT_TABLE = TABLE_CONFIG['quality_result_table']
 MANUAL_REVIEW_STATE_FILE = WORKSPACE_CONFIG['manual_review_state_file']
+SCAN_LOOKBACK_DAYS = REPAIR_CONFIG['scan_lookback_days']
 
 # 维护任务关键词（排除）
 MAINTENANCE_KEYWORDS = ['补充', '删除', '清理', '修复', '历史', '冗余', '临时', 'test', 'copy', '手插入']
@@ -259,9 +260,12 @@ def get_remaining_alert_tables():
                 SELECT src_db, src_tbl, dest_db, dest_tbl
                 FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
-                  AND created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
+                  AND created_at >= DATE_SUB(NOW(), INTERVAL {scan_lookback_days} DAY)
                 ORDER BY created_at DESC
-            """.format(quality_result_table=QUALITY_RESULT_TABLE)
+            """.format(
+                quality_result_table=QUALITY_RESULT_TABLE,
+                scan_lookback_days=SCAN_LOOKBACK_DAYS,
+            )
             cursor.execute(sql)
             rows = cursor.fetchall()
     finally:
@@ -291,9 +295,12 @@ def step1_scan_alerts():
                 SELECT id, name, src_db, src_tbl, dest_db, dest_tbl, `begin`, `end`, diff
                 FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
-                  AND created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
+                  AND created_at >= DATE_SUB(NOW(), INTERVAL {scan_lookback_days} DAY)
                 ORDER BY created_at DESC
-            """.format(quality_result_table=QUALITY_RESULT_TABLE)
+            """.format(
+                quality_result_table=QUALITY_RESULT_TABLE,
+                scan_lookback_days=SCAN_LOOKBACK_DAYS,
+            )
             cursor.execute(sql)
             rows = cursor.fetchall()
             
@@ -759,6 +766,10 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
     log("\n" + "="*70)
     log("【步骤5】执行复验")
     log("="*70)
+
+    if not completed_tasks:
+        log("\n5.1 跳过复验：本次没有实际完成的重跑任务")
+        return []
     
     # 记录重跑次数
     log("\n5.1 记录重跑次数...")
@@ -1150,17 +1161,29 @@ def main():
             log(f"  - {task['table']}: {task['error']}")
 
     results.extend(manual_review_tasks)
-    
-    # 步骤5: 执行复验
-    fuyan_results = step5_execute_fuyan(completed_tasks, failed_tasks, alerts)
 
-    summary, final_fuyan_results = evaluate_repair_outcome(
-        alerts=alerts,
-        completed_tasks=completed_tasks,
-        failed_tasks=failed_tasks,
-        manual_review_tasks=manual_review_tasks,
-        fuyan_results=fuyan_results,
-    )
+    if completed_tasks:
+        # 步骤5: 执行复验
+        fuyan_results = step5_execute_fuyan(completed_tasks, failed_tasks, alerts)
+
+        summary, final_fuyan_results = evaluate_repair_outcome(
+            alerts=alerts,
+            completed_tasks=completed_tasks,
+            failed_tasks=failed_tasks,
+            manual_review_tasks=manual_review_tasks,
+            fuyan_results=fuyan_results,
+        )
+    else:
+        log("\n⚠️ 本次没有成功启动并完成的修复任务，跳过复验和复验回查")
+        remaining_tables = get_remaining_alert_tables()
+        summary = summarize_repair_outcome(
+            alerts=alerts,
+            completed_tasks=completed_tasks,
+            failed_tasks=failed_tasks,
+            manual_review_tasks=manual_review_tasks,
+            remaining_tables=remaining_tables,
+        )
+        final_fuyan_results = []
     
     # 步骤6: 保存记录并发送TV报告
     step6_save_report(
