@@ -56,16 +56,30 @@ TASKS = {
 }
 
 
+def get_effective_workspace_root():
+    """优先使用配置路径；若配置路径无效，则回退到当前仓库根目录"""
+    configured_root = WORKSPACE_ROOT
+    current_repo_root = str(Path(__file__).resolve().parents[1])
+
+    for candidate in [configured_root, current_repo_root]:
+        if candidate and os.path.exists(os.path.join(candidate, "core", "repair_strict_7step.py")):
+            return candidate
+    return configured_root
+
+
+EFFECTIVE_WORKSPACE_ROOT = get_effective_workspace_root()
+
+
 def check_script_exists(script_name):
     """检查脚本文件是否存在"""
-    script_path = os.path.join(WORKSPACE_ROOT, script_name)
+    script_path = os.path.join(EFFECTIVE_WORKSPACE_ROOT, script_name)
     return os.path.exists(script_path)
 
 
 def check_script_syntax(script_name):
     """检查脚本语法是否正确"""
     import py_compile
-    script_path = os.path.join(WORKSPACE_ROOT, script_name)
+    script_path = os.path.join(EFFECTIVE_WORKSPACE_ROOT, script_name)
     try:
         py_compile.compile(
             script_path,
@@ -89,7 +103,7 @@ def check_env_variables():
 
 def check_csv_file():
     """检查CSV文件"""
-    csv_path = os.path.join(WORKSPACE_ROOT, "dolphinscheduler", "schedules_export.csv")
+    csv_path = os.path.join(EFFECTIVE_WORKSPACE_ROOT, "dolphinscheduler", "schedules_export.csv")
     if not os.path.exists(csv_path):
         return False, "文件不存在"
     if os.path.getsize(csv_path) == 0:
