@@ -145,6 +145,43 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(result["workflow_name"], "DWD")
         self.assertEqual(result["task_code"], "task-1")
 
+    def test_step3_start_repair_uses_ds32_compatible_start_payload(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "dwd_fox_mission_log",
+                "dt": "2026-04-29",
+                "workflow_code": "wf-1",
+                "workflow_name": "DWD",
+                "task_code": "task-1",
+                "task_name": "dwd_fox_mission_log",
+            }
+        ]
+        captured = {}
+
+        def fake_ds_api_post(endpoint, data):
+            captured["endpoint"] = endpoint
+            captured["data"] = data
+            return True, {"data": [12345]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), mock.patch.object(
+            module, "log"
+        ), mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        self.assertEqual(captured["endpoint"], "/projects/default-project/executors/start-process-instance")
+        self.assertEqual(captured["data"]["processDefinitionCode"], "wf-1")
+        self.assertNotIn("workflowDefinitionCode", captured["data"])
+        self.assertEqual(captured["data"]["startNodeList"], "task-1")
+        self.assertEqual(captured["data"]["taskDependType"], "TASK_ONLY")
+        self.assertEqual(captured["data"]["scheduleTime"], "")
+        self.assertEqual(
+            captured["data"]["startParams"],
+            '{"global": [{"prop": "dt", "value": "2026-04-29"}]}',
+        )
+        self.assertEqual(results[0]["instance_id"], 12345)
+        self.assertEqual(running_instances[0]["instance_id"], 12345)
+
     def test_step2_find_locations_falls_back_to_process_definition_list_for_ds32(self):
         module = load_module()
 

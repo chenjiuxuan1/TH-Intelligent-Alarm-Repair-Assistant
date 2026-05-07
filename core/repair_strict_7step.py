@@ -585,20 +585,19 @@ def step3_start_repair(tasks):
         log(f"  任务: {task['task_name']}")
         
         # 启动修复
-        schedule_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         data = {
-            'workflowDefinitionCode': workflow_code,
+            'processDefinitionCode': workflow_code,
             'startNodeList': task_code,
             'taskDependType': 'TASK_ONLY',
             'failureStrategy': 'CONTINUE',
             'warningType': 'NONE',
             'warningGroupId': 0,
             'execType': 'START_PROCESS',
-            'startParams': f'[{{"prop":"dt","value":"{dt}"}}]',
+            'startParams': json.dumps({'global': [{'prop': 'dt', 'value': dt}]}),
             'environmentCode': DS_ENVIRONMENT_CODE,
             'tenantCode': DS_TENANT_CODE,
             'dryRun': 0,
-            'scheduleTime': schedule_time
+            'scheduleTime': ''
         }
         
         success, result, msg = ds_api_post(f"/projects/{PROJECT_CODE}/executors/start-process-instance", data)
@@ -803,17 +802,20 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
         fuyan_code = get_fuyan_code(fuyan)
         log(f"  [{i}] {fuyan_name}")
         
-        schedule_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         data = {
             'processDefinitionCode': fuyan_code,
             'failureStrategy': 'CONTINUE',
             'warningType': 'NONE',
             'warningGroupId': 0,
+            'processInstancePriority': 'MEDIUM',
+            'workerGroup': 'default',
             'execType': 'START_PROCESS',
             'environmentCode': DS_ENVIRONMENT_CODE,
             'tenantCode': DS_TENANT_CODE,
+            'taskDependType': 'TASK_POST',
+            'runMode': 'RUN_MODE_SERIAL',
             'dryRun': 0,
-            'scheduleTime': schedule_time
+            'scheduleTime': ''
         }
         
         success, result, msg = ds_api_post(f"/projects/{FUYAN_PROJECT_CODE}/executors/start-process-instance", data)
