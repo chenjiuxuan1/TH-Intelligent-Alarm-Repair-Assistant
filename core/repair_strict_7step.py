@@ -93,6 +93,47 @@ def get_fuyan_code(workflow):
     return workflow.get('code') or workflow.get('workflow_code') or ''
 
 
+def normalize_fuyan_level(workflow):
+    level = (workflow.get('level') or '').strip().lower()
+    if level in {'all', '全级别'}:
+        return 'all'
+    if '1' in level:
+        return '1'
+    if '2' in level:
+        return '2'
+    if '3' in level:
+        return '3'
+    return level
+
+
+def select_fuyan_workflows(alerts):
+    """按旧策略智能选择复验工作流：每日全级别必跑，dwb 走1级，其余走3级"""
+    selected_levels = set()
+    for alert in alerts or []:
+        table = (alert.get('table') or '').lower()
+        if table.startswith('dwb_'):
+            selected_levels.add('1')
+        else:
+            selected_levels.add('3')
+
+    selected = []
+    seen_codes = set()
+    for workflow in FUYAN_WORKFLOWS:
+        workflow_code = get_fuyan_code(workflow)
+        workflow_level = normalize_fuyan_level(workflow)
+        workflow_name = get_fuyan_name(workflow)
+        include = False
+        if workflow_level == 'all':
+            include = workflow_name.startswith('每日复验全级别数据')
+        elif workflow_level in selected_levels:
+            include = True
+
+        if include and workflow_code not in seen_codes:
+            selected.append(workflow)
+            seen_codes.add(workflow_code)
+    return selected
+
+
 def log(msg):
     ts = datetime.now().strftime('%H:%M:%S')
     print(f"[{ts}] {msg}", flush=True)
@@ -741,9 +782,12 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
     
     # 执行复验
     log(f"\n5.2 执行复验工作流...")
+    fuyan_workflows = select_fuyan_workflows(alerts)
     fuyan_results = []
+
+    log(f"  选中复验工作流: {len(fuyan_workflows)} 个")
     
-    for i, fuyan in enumerate(FUYAN_WORKFLOWS, 1):
+    for i, fuyan in enumerate(fuyan_workflows, 1):
         fuyan_name = get_fuyan_name(fuyan)
         fuyan_code = get_fuyan_code(fuyan)
         log(f"  [{i}] {fuyan_name}")

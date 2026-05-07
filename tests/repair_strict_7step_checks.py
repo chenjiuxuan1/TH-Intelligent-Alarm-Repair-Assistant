@@ -85,6 +85,43 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["name"], "每日复验全级别数据(W-1)")
         self.assertEqual(results[0]["id"], 12345)
 
+    def test_step5_execute_fuyan_selects_daily_and_level3_for_non_dwb_tables(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {"workflow_name": "每日复验全级别数据(W-1)", "workflow_code": "wf-daily", "level": "全级别"},
+            {"workflow_name": "每小时复验1级表数据(D-1)", "workflow_code": "wf-l1", "level": "1级表"},
+            {"workflow_name": "两小时复验3级表数据(D-1)", "workflow_code": "wf-l3", "level": "3级表"},
+            {"workflow_name": "每周复验全级别数据(M-3)", "workflow_code": "wf-weekly", "level": "全级别"},
+        ]
+        started_codes = []
+
+        def fake_ds_api_post(endpoint, data):
+            started_codes.append(data["processDefinitionCode"])
+            return True, {"data": [len(started_codes)]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
+            module.step5_execute_fuyan([], [], [{"table": "dwd_fox_mission_log"}])
+
+        self.assertEqual(started_codes, ["wf-daily", "wf-l3"])
+
+    def test_step5_execute_fuyan_selects_daily_and_level1_for_dwb_tables(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {"workflow_name": "每日复验全级别数据(W-1)", "workflow_code": "wf-daily", "level": "全级别"},
+            {"workflow_name": "每小时复验1级表数据(D-1)", "workflow_code": "wf-l1", "level": "1级表"},
+            {"workflow_name": "两小时复验3级表数据(D-1)", "workflow_code": "wf-l3", "level": "3级表"},
+        ]
+        started_codes = []
+
+        def fake_ds_api_post(endpoint, data):
+            started_codes.append(data["processDefinitionCode"])
+            return True, {"data": [len(started_codes)]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
+            module.step5_execute_fuyan([], [], [{"table": "dwb_cash_audit"}])
+
+        self.assertEqual(started_codes, ["wf-daily", "wf-l1"])
+
     def test_step2_search_in_workflow_falls_back_to_process_definition_for_ds32(self):
         module = load_module()
 
