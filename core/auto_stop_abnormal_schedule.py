@@ -8,17 +8,23 @@
 import json
 import csv
 import urllib.request
-import os
 from datetime import datetime
+from pathlib import Path
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config.config import DS_CONFIG, TV_CONFIG, WORKSPACE_CONFIG
 
 # 配置
-DS_BASE_URL = "http://172.20.0.235:12345/dolphinscheduler"
-DS_TOKEN = "097ef3039a5d7af826c1cab60dedf96a"
-PROJECT_CODE = "158514956085248"
-
-# TV配置
-TV_API_URL = "https://tv-service-alert.kuainiu.chat/alert/v2/array"
-TV_BOT_ID = "fbbcabb4-d187-4d9e-8e1e-ba7654a24d1c"
+DS_BASE_URL = DS_CONFIG['base_url']
+DS_TOKEN = DS_CONFIG['token']
+PROJECT_CODE = DS_CONFIG['project_code']
+TV_API_URL = TV_CONFIG['api_url']
+TV_BOT_ID = TV_CONFIG['bot_id']
+TV_APP_ID = TV_CONFIG['app_id']
+SCHEDULE_EXPORT_CSV = WORKSPACE_CONFIG['schedule_export_csv']
+WORKSPACE_ROOT = WORKSPACE_CONFIG['root']
 
 def send_tv_notification(messages):
     """发送TV通知"""
@@ -26,7 +32,7 @@ def send_tv_notification(messages):
         return
     
     alert_data = {
-        "appId": "alert",
+        "appId": TV_APP_ID,
         "botId": TV_BOT_ID,
         "messages": messages
     }
@@ -124,8 +130,7 @@ def main():
     print(f"⏰ 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # 1. 加载调度配置
-    csv_path = '/home/node/.openclaw/workspace/dolphinscheduler/schedules_export.csv'
-    schedules = load_schedules_from_csv(csv_path)
+    schedules = load_schedules_from_csv(SCHEDULE_EXPORT_CSV)
     print(f"📋 已加载 {len(schedules)} 个调度配置")
     
     # 统计ONLINE/OFFLINE数量
@@ -241,7 +246,7 @@ def main():
     send_dingtalk_report(report)
     
     # 6. 保存检测记录
-    record_file = f"/home/node/.openclaw/workspace/schedule_check_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    record_file = f"{WORKSPACE_ROOT}/schedule_check_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     record = {
         'check_time': datetime.now().isoformat(),
         'total_schedules': len(schedules),

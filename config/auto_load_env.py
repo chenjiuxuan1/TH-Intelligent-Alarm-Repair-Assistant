@@ -7,6 +7,33 @@
 import os
 import re
 
+
+SUPPORTED_ENV_VARS = {
+    'APP_WORKSPACE',
+    'SCHEDULE_EXPORT_CSV',
+    'DS_BASE_URL',
+    'DS_TOKEN',
+    'DS_PROJECT_CODE',
+    'DS_FUYAN_PROJECT_CODE',
+    'DS_FUYAN_PROJECT_NAME',
+    'DS_ENVIRONMENT_CODE',
+    'DS_TENANT_CODE',
+    'FUYAN_WORKFLOWS_JSON',
+    'DB_HOST',
+    'DB_PORT',
+    'DB_USER',
+    'DB_PASSWORD',
+    'DB_NAME',
+    'OPENCLAW_WEBHOOK',
+    'OPENCLAW_HOOK_TOKEN',
+    'TV_API_URL',
+    'TV_BOT_ID',
+    'TV_APP_ID',
+    'TV_MENTIONS',
+    'QUALITY_RESULT_TABLE',
+    'QUALITY_ALERT_TABLE',
+}
+
 def load_bashrc_env():
     """
     从 ~/.bashrc 文件读取 export 语句并设置环境变量
@@ -33,7 +60,7 @@ def load_bashrc_env():
         loaded_count = 0
         for var_name, value in matches:
             # 只加载关键的环境变量
-            if var_name in ['DS_TOKEN', 'DB_PASSWORD', 'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME']:
+            if var_name in SUPPORTED_ENV_VARS:
                 if value and not os.environ.get(var_name):
                     os.environ[var_name] = value
                     loaded_count += 1

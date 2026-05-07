@@ -32,6 +32,7 @@ Thumbs.db
 *.key
 *.pem
 *.env
+!.env.local
 
 # 运行时数据（保留目录结构）
 data/auto_repair_records/*

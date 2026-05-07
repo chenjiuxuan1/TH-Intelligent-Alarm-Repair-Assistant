@@ -88,10 +88,20 @@
 ### 环境准备
 
 ```bash
-# 设置环境变量（在 ~/.bashrc 中）
+# 推荐先复制模板，再按国家/集群填写
+cp .env.example .env.local
+
+# 至少需要这些核心变量
+export DS_BASE_URL='http://your-ds-host:12345/dolphinscheduler'
 export DS_TOKEN='your_token'
+export DS_PROJECT_CODE='your_main_project_code'
+export DS_FUYAN_PROJECT_CODE='your_fuyan_project_code'
+export DS_ENVIRONMENT_CODE='your_environment_code'
+export DS_TENANT_CODE='your_tenant_code'
 export DB_PASSWORD='your_password'
 ```
+
+多国家迁移说明见 [docs/country-config-migration.md](/Users/jiangchuanchen/Desktop/INE-Intelligent-Alarm-Repair-Assistant/docs/country-config-migration.md)。
 
 ### 首次部署（复现指南）
 

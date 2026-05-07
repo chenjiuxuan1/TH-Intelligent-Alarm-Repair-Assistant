@@ -11,8 +11,11 @@
 """
 
 import sys
-sys.path.insert(0, '/home/node/.openclaw/workspace')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import auto_load_env
+from config.config import DS_CONFIG, FUYAN_WORKFLOWS, TABLE_CONFIG, WORKSPACE_CONFIG
 
 import json
 import os
@@ -22,18 +25,16 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 # 配置
-WORKSPACE = '/home/node/.openclaw/workspace'
-DS_BASE = 'http://172.20.0.235:12345/dolphinscheduler'
-PROJECT_CODE = '158514956085248'
-FUYAN_PROJECT_CODE = '158515019231232'
-DS_TOKEN = '72b6ff29a6484039a1ddd3f303973505'
-MANUAL_REVIEW_STATE_FILE = f"{WORKSPACE}/auto_repair_records/manual_review_state.json"
-
-# 复验工作流
-FUYAN_WORKFLOWS = [
-    {'name': '每日复验全级别数据(W-1)', 'code': '158515019703296', 'level': 'all'},
-    {'name': '两小时复验3级表数据(D-1)', 'code': '158515019667456', 'level': '3'},
-]
+WORKSPACE = WORKSPACE_CONFIG['root']
+AUTO_REPAIR_RECORDS_DIR = WORKSPACE_CONFIG['auto_repair_records_dir']
+DS_BASE = DS_CONFIG['base_url']
+PROJECT_CODE = DS_CONFIG['project_code']
+FUYAN_PROJECT_CODE = DS_CONFIG['fuyan_project_code']
+DS_TOKEN = DS_CONFIG['token']
+DS_ENVIRONMENT_CODE = DS_CONFIG['environment_code']
+DS_TENANT_CODE = DS_CONFIG['tenant_code']
+QUALITY_RESULT_TABLE = TABLE_CONFIG['quality_result_table']
+MANUAL_REVIEW_STATE_FILE = WORKSPACE_CONFIG['manual_review_state_file']
 
 # 维护任务关键词（排除）
 MAINTENANCE_KEYWORDS = ['补充', '删除', '清理', '修复', '历史', '冗余', '临时', 'test', 'copy', '手插入']
@@ -162,11 +163,11 @@ def get_remaining_alert_tables():
         with conn.cursor() as cursor:
             sql = """
                 SELECT src_db, src_tbl, dest_db, dest_tbl
-                FROM wattrel_quality_result
+                FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
                   AND created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
                 ORDER BY created_at DESC
-            """
+            """.format(quality_result_table=QUALITY_RESULT_TABLE)
             cursor.execute(sql)
             rows = cursor.fetchall()
     finally:
@@ -194,11 +195,11 @@ def step1_scan_alerts():
         with conn.cursor() as cursor:
             sql = """
                 SELECT id, name, src_db, src_tbl, dest_db, dest_tbl, `begin`, `end`, diff
-                FROM wattrel_quality_result
+                FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
                   AND created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
                 ORDER BY created_at DESC
-            """
+            """.format(quality_result_table=QUALITY_RESULT_TABLE)
             cursor.execute(sql)
             rows = cursor.fetchall()
             
@@ -493,8 +494,8 @@ def step3_start_repair(tasks):
             'warningGroupId': 0,
             'execType': 'START_PROCESS',
             'startParams': f'[{{"prop":"dt","value":"{dt}"}}]',
-            'environmentCode': 154818922491872,
-            'tenantCode': 'dolphinscheduler',
+            'environmentCode': DS_ENVIRONMENT_CODE,
+            'tenantCode': DS_TENANT_CODE,
             'dryRun': 0,
             'scheduleTime': schedule_time
         }
@@ -667,7 +668,7 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
     
     # 记录重跑次数
     log("\n5.1 记录重跑次数...")
-    record_file = f"{WORKSPACE}/auto_repair_records/repair_counts.json"
+    record_file = WORKSPACE_CONFIG['repair_counts_file']
     counts = {}
     if os.path.exists(record_file):
         with open(record_file, 'r') as f:
@@ -698,8 +699,8 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
             'warningType': 'NONE',
             'warningGroupId': 0,
             'execType': 'START_PROCESS',
-            'environmentCode': 154818922491872,
-            'tenantCode': 'dolphinscheduler',
+            'environmentCode': DS_ENVIRONMENT_CODE,
+            'tenantCode': DS_TENANT_CODE,
             'dryRun': 0,
             'scheduleTime': schedule_time
         }
@@ -859,7 +860,7 @@ def step6_save_report(results, completed_tasks, failed_tasks, final_fuyan_result
     log("【步骤6】保存记录")
     log("="*70)
     
-    record_dir = f"{WORKSPACE}/auto_repair_records/{datetime.now().strftime('%Y-%m-%d')}"
+    record_dir = f"{AUTO_REPAIR_RECORDS_DIR}/{datetime.now().strftime('%Y-%m-%d')}"
     os.makedirs(record_dir, exist_ok=True)
     
     detail_file = f"{record_dir}/detail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -967,7 +968,10 @@ def send_tv_report_to_dingtalk(report_content):
     
     try:
         # 保存报告到文件
-        report_file = f"{WORKSPACE}/auto_repair_records/{datetime.now().strftime('%Y-%m-%d')}/tv_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        report_file = (
+            f"{AUTO_REPAIR_RECORDS_DIR}/{datetime.now().strftime('%Y-%m-%d')}/"
+            f"tv_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        )
         with open(report_file, 'w', encoding='utf-8') as f:
             f.write(report_content)
         

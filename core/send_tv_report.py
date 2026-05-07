@@ -11,11 +11,15 @@ import urllib.request
 import urllib.error
 import sys
 from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config.config import TV_CONFIG
 
 # TV API配置
-TV_API_URL = 'https://tv-service-alert.kuainiu.chat/alert/v2/array'
-TV_BOT_ID = 'fbbcabb4-d187-4d9e-8e1e-ba7654a24d1c'
-TV_APP_ID = 'alert'
+TV_API_URL = TV_CONFIG['api_url']
+TV_BOT_ID = TV_CONFIG['bot_id']
+TV_APP_ID = TV_CONFIG['app_id']
 
 
 def send_tv_report(message, mentions=None):

@@ -6,14 +6,38 @@ from datetime import datetime
 from unittest import mock
 
 
-MODULE_PATH = "/Users/jiangchuanchen/Desktop/openclaw-dw-assistant/core/repair_strict_7step.py"
+MODULE_PATH = "/Users/jiangchuanchen/Desktop/INE-Intelligent-Alarm-Repair-Assistant/core/repair_strict_7step.py"
 
 
 def load_module():
     fake_config = types.ModuleType("config")
     fake_config.auto_load_env = object()
+    fake_config_config = types.ModuleType("config.config")
+    fake_config_config.DS_CONFIG = {
+        "base_url": "https://default.example/dolphinscheduler",
+        "token": "default-token",
+        "project_code": "default-project",
+        "fuyan_project_code": "default-fuyan-project",
+        "environment_code": "10001",
+        "tenant_code": "tenant_default",
+    }
+    fake_config_config.WORKSPACE_CONFIG = {
+        "root": "/tmp/default-workspace",
+        "manual_review_state_file": "/tmp/default-workspace/auto_repair_records/manual_review_state.json",
+        "auto_repair_records_dir": "/tmp/default-workspace/auto_repair_records",
+        "repair_counts_file": "/tmp/default-workspace/auto_repair_records/repair_counts.json",
+    }
+    fake_config_config.TABLE_CONFIG = {
+        "quality_result_table": "default_quality_result",
+        "quality_alert_table": "default_quality_alert",
+    }
+    fake_config_config.FUYAN_WORKFLOWS = [
+        {"name": "默认复验", "code": "wf-default", "level": "all"},
+    ]
     previous_config = sys.modules.get("config")
+    previous_config_config = sys.modules.get("config.config")
     sys.modules["config"] = fake_config
+    sys.modules["config.config"] = fake_config_config
     try:
         spec = importlib.util.spec_from_file_location("repair_strict_7step", MODULE_PATH)
         module = importlib.util.module_from_spec(spec)
@@ -24,9 +48,24 @@ def load_module():
             sys.modules["config"] = previous_config
         else:
             sys.modules.pop("config", None)
+        if previous_config_config is not None:
+            sys.modules["config.config"] = previous_config_config
+        else:
+            sys.modules.pop("config.config", None)
 
 
 class RepairStrict7StepTests(unittest.TestCase):
+    def test_module_constants_are_loaded_from_shared_config(self):
+        module = load_module()
+
+        self.assertEqual(module.WORKSPACE, "/tmp/default-workspace")
+        self.assertEqual(module.DS_BASE, "https://default.example/dolphinscheduler")
+        self.assertEqual(module.PROJECT_CODE, "default-project")
+        self.assertEqual(module.FUYAN_PROJECT_CODE, "default-fuyan-project")
+        self.assertEqual(module.DS_TOKEN, "default-token")
+        self.assertEqual(module.MANUAL_REVIEW_STATE_FILE, "/tmp/default-workspace/auto_repair_records/manual_review_state.json")
+        self.assertEqual(module.FUYAN_WORKFLOWS, [{"name": "默认复验", "code": "wf-default", "level": "all"}])
+
     def test_resolve_repair_table_prefers_downstream_warehouse_layer_over_ods(self):
         module = load_module()
         row = {
@@ -230,6 +269,22 @@ class RepairStrict7StepTests(unittest.TestCase):
             count = module.count_remaining_alert_tables()
 
         self.assertEqual(count, 2)
+
+    def test_count_remaining_alert_tables_queries_configured_result_table(self):
+        module = load_module()
+
+        fake_cursor = mock.MagicMock()
+        fake_cursor.fetchall.return_value = []
+        fake_conn = mock.MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cursor
+        fake_db_module = types.ModuleType("alert.db_config")
+        fake_db_module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+
+        with mock.patch.dict(sys.modules, {"alert.db_config": fake_db_module}):
+            module.count_remaining_alert_tables()
+
+        executed_sql = fake_cursor.execute.call_args[0][0]
+        self.assertIn("FROM default_quality_result", executed_sql)
 
     def test_summarize_repair_outcome_uses_post_fuyan_remaining_tables(self):
         module = load_module()

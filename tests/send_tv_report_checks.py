@@ -6,7 +6,7 @@ import urllib.error
 from unittest import mock
 
 
-MODULE_PATH = "/Users/jiangchuanchen/Desktop/openclaw-dw-assistant/core/send_tv_report.py"
+MODULE_PATH = "/Users/jiangchuanchen/Desktop/INE-Intelligent-Alarm-Repair-Assistant/core/send_tv_report.py"
 
 
 def load_module():
@@ -35,6 +35,26 @@ class FakeResponse:
 
 
 class SendTvReportTests(unittest.TestCase):
+    def test_module_uses_shared_tv_config(self):
+        fake_config = type(
+            "FakeConfigModule",
+            (),
+            {
+                "TV_CONFIG": {
+                    "api_url": "https://tv.id.example/api",
+                    "bot_id": "bot-id-001",
+                    "app_id": "alert-id",
+                }
+            },
+        )
+
+        with mock.patch.dict("sys.modules", {"config.config": fake_config}):
+            module = load_module()
+
+        self.assertEqual(module.TV_API_URL, "https://tv.id.example/api")
+        self.assertEqual(module.TV_BOT_ID, "bot-id-001")
+        self.assertEqual(module.TV_APP_ID, "alert-id")
+
     def test_send_tv_report_uses_alert_messages_payload(self):
         module = load_module()
         captured = {}

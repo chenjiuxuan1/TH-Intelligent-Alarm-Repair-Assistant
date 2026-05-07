@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import sys
-sys.path.insert(0, "/home/node/.openclaw/workspace")
-import auto_load_env
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config import auto_load_env
+from config.config import DB_CONFIG, OPENCLAW_CONFIG, TABLE_CONFIG
 
 
 # -*- coding: utf-8 -*-
@@ -21,19 +24,16 @@ import pymysql
 import requests
 import time
 import json
-import os
 
 # ================= 1. 配置区 =================
-# 数据库配置 (从环境变量读取)
-DB_HOST = os.environ.get('DB_HOST', '172.20.0.235')
-DB_PORT = int(os.environ.get('DB_PORT', '13306'))
-DB_USER = os.environ.get('DB_USER', 'e_ds')
-DB_PASS = os.environ.get('DB_PASSWORD', '')
-DB_NAME = os.environ.get('DB_NAME', 'wattrel')
-
-# OpenClaw 本地 Webhook 地址（使用 /hooks/wattrel/wake 端点）
-OPENCLAW_WEBHOOK = os.environ.get('OPENCLAW_WEBHOOK', 'http://127.0.0.1:18789/hooks/wattrel/wake')
-OPENCLAW_HOOK_TOKEN = os.environ.get('OPENCLAW_HOOK_TOKEN', 'MySecretAlertToken123')
+DB_HOST = DB_CONFIG['host']
+DB_PORT = DB_CONFIG['port']
+DB_USER = DB_CONFIG['user']
+DB_PASS = DB_CONFIG['password']
+DB_NAME = DB_CONFIG['database']
+OPENCLAW_WEBHOOK = OPENCLAW_CONFIG['webhook']
+OPENCLAW_HOOK_TOKEN = OPENCLAW_CONFIG['token']
+QUALITY_ALERT_TABLE = TABLE_CONFIG['quality_alert_table']
 # ==========================================
 
 
@@ -66,9 +66,9 @@ def fetch_and_forward_alerts():
         cursor = conn.cursor(pymysql.cursors.DictCursor)
         
         # 抓取所有 status = 0 (未处理) 的告警
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT id, content, created_at 
-            FROM wattrel_quality_alert 
+            FROM {QUALITY_ALERT_TABLE}
             WHERE status = 0 
             ORDER BY created_at ASC
             limit 2
@@ -132,7 +132,7 @@ def fetch_and_forward_alerts():
         # 更新数据库状态，防止重复报警
         if processed_ids:
             ids_str = ",".join(processed_ids)
-            cursor.execute(f"UPDATE wattrel_quality_alert SET status = 1 WHERE id IN ({ids_str})")
+            cursor.execute(f"UPDATE {QUALITY_ALERT_TABLE} SET status = 1 WHERE id IN ({ids_str})")
             conn.commit()
             print(f"[{time.strftime('%H:%M:%S')}] 数据库回写完毕，已标记为处理完成 (status=1)。")
         

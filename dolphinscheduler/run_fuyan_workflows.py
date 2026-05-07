@@ -2,8 +2,11 @@
 
 # 自动加载环境变量
 import sys
-sys.path.insert(0, "/home/node/.openclaw/workspace")
-import auto_load_env
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config import auto_load_env
+from config.config import DS_CONFIG, FUYAN_WORKFLOWS
 
 # -*- coding: utf-8 -*-
 """
@@ -15,71 +18,16 @@ import auto_load_env
 日期：2026-03-23
 """
 
-import os
 import urllib.request
 import urllib.error
 import json
-import sys
 import time
 from datetime import datetime
+from urllib.parse import urlencode
 
 # DolphinScheduler 配置
-DS_CONFIG = {
-    'base_url': 'http://172.20.0.235:12345/dolphinscheduler',
-    'token': os.environ.get('DS_TOKEN', '')
-}
-
-# 复验工作流列表（从CSV中提取）
-FUYAN_WORKFLOWS = [
-    {
-        'project_name': '国内数仓-质量校验',
-        'project_code': '158515019231232',
-        'workflow_name': '每日复验全级别数据(W-1)',
-        'workflow_code': '158515019703296',
-        'schedule': '每日',
-        'level': '全级别'
-    },
-    {
-        'project_name': '国内数仓-质量校验',
-        'project_code': '158515019231232',
-        'workflow_name': '每小时复验1级表数据(D-1)',
-        'workflow_code': '158515019593728',
-        'schedule': '每小时',
-        'level': '1级表'
-    },
-    {
-        'project_name': '国内数仓-质量校验',
-        'project_code': '158515019231232',
-        'workflow_name': '每小时复验2级表数据(D-1)',
-        'workflow_code': '158515019630592',
-        'schedule': '每小时',
-        'level': '2级表'
-    },
-    {
-        'project_name': '国内数仓-质量校验',
-        'project_code': '158515019231232',
-        'workflow_name': '两小时复验3级表数据(D-1)',
-        'workflow_code': '158515019667456',
-        'schedule': '每2小时',
-        'level': '3级表'
-    },
-    {
-        'project_name': '国内数仓-质量校验',
-        'project_code': '158515019231232',
-        'workflow_name': '每周复验全级别数据(M-3)',
-        'workflow_code': '158515019741184',
-        'schedule': '每周',
-        'level': '全级别'
-    },
-    {
-        'project_name': '国内数仓-质量校验',
-        'project_code': '158515019231232',
-        'workflow_name': '每月11日复验全级别数据(Y-2)',
-        'workflow_code': '158515019778048',
-        'schedule': '每月',
-        'level': '全级别'
-    }
-]
+DS_ENVIRONMENT_CODE = DS_CONFIG['environment_code']
+DS_TENANT_CODE = DS_CONFIG['tenant_code']
 
 
 def start_workflow(project_code, workflow_code, workflow_name, dt=None):
@@ -105,8 +53,8 @@ def start_workflow(project_code, workflow_code, workflow_name, dt=None):
         'warningGroupId': '0',
         'processInstancePriority': 'MEDIUM',
         'workerGroup': 'default',
-        'environmentCode': '154818922491872',  # prod环境
-        'tenantCode': 'dolphinscheduler',
+        'environmentCode': DS_ENVIRONMENT_CODE,
+        'tenantCode': DS_TENANT_CODE,
         'taskDependType': 'TASK_POST',
         'runMode': 'RUN_MODE_SERIAL',
         'execType': 'START_PROCESS',
@@ -125,7 +73,7 @@ def start_workflow(project_code, workflow_code, workflow_name, dt=None):
     
     try:
         # 编码请求体
-        encoded_body = urllib.parse.urlencode(body).encode('utf-8')
+        encoded_body = urlencode(body).encode('utf-8')
         
         req = urllib.request.Request(url, data=encoded_body, headers=headers, method='POST')
         

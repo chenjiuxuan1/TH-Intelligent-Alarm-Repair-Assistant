@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import sys
-sys.path.insert(0, "/home/node/.openclaw/workspace")
-import auto_load_env
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from config import auto_load_env
+from config.config import DB_CONFIG, OPENCLAW_CONFIG, TABLE_CONFIG
 
 
 # -*- coding: utf-8 -*-
@@ -22,22 +25,20 @@ import io
 import argparse
 import json
 import requests
-import os
 from datetime import datetime
 
 # 确保 UTF-8 输出
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 # ================= 配置区 =================
-OPENCLAW_WEBHOOK = os.environ.get('OPENCLAW_WEBHOOK', 'http://127.0.0.1:18789/hooks/wattrel/wake')
-OPENCLAW_HOOK_TOKEN = os.environ.get('OPENCLAW_HOOK_TOKEN', 'MySecretAlertToken123')
-
-# 数据库配置（仅 --from-db 模式使用，从环境变量读取）
-DB_HOST = os.environ.get('DB_HOST', '172.20.0.235')
-DB_PORT = int(os.environ.get('DB_PORT', '13306'))
-DB_USER = os.environ.get('DB_USER', 'e_ds')
-DB_PASS = os.environ.get('DB_PASSWORD', '')
-DB_NAME = os.environ.get('DB_NAME', 'wattrel')
+OPENCLAW_WEBHOOK = OPENCLAW_CONFIG['webhook']
+OPENCLAW_HOOK_TOKEN = OPENCLAW_CONFIG['token']
+DB_HOST = DB_CONFIG['host']
+DB_PORT = DB_CONFIG['port']
+DB_USER = DB_CONFIG['user']
+DB_PASS = DB_CONFIG['password']
+DB_NAME = DB_CONFIG['database']
+QUALITY_ALERT_TABLE = TABLE_CONFIG['quality_alert_table']
 # ==========================================
 
 
@@ -127,9 +128,9 @@ def fetch_latest_alert_from_db():
         cursor = conn.cursor(pymysql.cursors.DictCursor)
         
         # 获取最新的一条未处理告警
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT id, content, type, created_at 
-            FROM wattrel_quality_alert 
+            FROM {QUALITY_ALERT_TABLE}
             WHERE status = 0 
             ORDER BY created_at DESC 
             LIMIT 1
@@ -237,7 +238,7 @@ def send_from_db():
                 charset='utf8mb4'
             )
             cursor = conn.cursor()
-            cursor.execute(f"UPDATE wattrel_quality_alert SET status = 1 WHERE id = {alert['id']}")
+            cursor.execute(f"UPDATE {QUALITY_ALERT_TABLE} SET status = 1 WHERE id = {alert['id']}")
             conn.commit()
             conn.close()
             print(f"✅ 数据库状态已更新 (status=1)")
