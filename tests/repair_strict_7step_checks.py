@@ -809,6 +809,30 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertIn("带定时", tasks[0]["error"])
         self.assertIn("1/2H", tasks[0]["error"])
 
+    def test_step2_find_locations_keeps_out_of_window_status_and_skips_search(self):
+        module = load_module()
+        alerts = [
+            {
+                "id": 1,
+                "table": "dwd_user_coupon",
+                "dt": "2026-02-08",
+                "diff": -7,
+                "status": "skipped_out_of_window",
+                "error": "告警窗口 begin=2026-02-08, end=2026-05-09，begin 早于自动修复窗口起点 2026-05-03，转人工处理",
+            }
+        ]
+
+        with mock.patch.object(module, "step2_search_in_workflow") as mocked_search, \
+            mock.patch.object(module, "get_workflow_definition_list") as mocked_list, \
+            mock.patch.object(module, "log"):
+            tasks = module.step2_find_locations(alerts)
+
+        mocked_search.assert_not_called()
+        mocked_list.assert_not_called()
+        self.assertEqual(tasks[0]["status"], "skipped_out_of_window")
+        self.assertEqual(tasks[0]["error"], alerts[0]["error"])
+        self.assertEqual(tasks[0]["table"], "dwd_user_coupon")
+
     def test_step2_search_in_workflow_marks_forbidden_task_for_manual_review(self):
         module = load_module()
 

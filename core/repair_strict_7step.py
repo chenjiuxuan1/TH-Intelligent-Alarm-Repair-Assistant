@@ -894,6 +894,24 @@ def step2_find_locations(alerts):
     for alert in alerts:
         table = alert['table']
         log(f"🔍 {table}")
+
+        if alert.get('status') == 'skipped_out_of_window':
+            task = {
+                'alert_id': alert['id'],
+                'table': table,
+                'dt': alert['dt'],
+                'diff': alert.get('diff'),
+                'workflow_code': '',
+                'workflow_name': '超出自动修复窗口',
+                'task_code': '',
+                'task_name': '',
+                'task_flag': '',
+                'status': 'skipped_out_of_window',
+                'error': alert.get('error', ''),
+            }
+            log(f"  ⏭️ {task['error']}")
+            tasks.append(task)
+            continue
         
         location = None
         scheduled_location = None
