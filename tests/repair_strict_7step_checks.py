@@ -105,7 +105,40 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0]["table"], "dwd_old_table")
         self.assertEqual(alerts[0]["status"], "skipped_out_of_window")
-        self.assertIn("7天", alerts[0]["error"])
+        self.assertIn("begin", alerts[0]["error"])
+        self.assertIn("2026-05-03", alerts[0]["error"])
+
+    def test_step1_scan_alerts_skips_alert_when_begin_end_window_exceeds_lookback(self):
+        module = load_module()
+        rows = [
+            {
+                "id": 1,
+                "name": "long window alert",
+                "src_db": "ods",
+                "src_tbl": "ods_long_window_table",
+                "dest_db": "dwd",
+                "dest_tbl": "dwd_long_window_table",
+                "begin": datetime(2026, 2, 8, 0, 0, 0),
+                "end": datetime(2026, 5, 9, 0, 0, 0),
+                "diff": 1,
+            }
+        ]
+
+        fake_cursor = mock.MagicMock()
+        fake_cursor.fetchall.return_value = rows
+        fake_conn = mock.MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cursor
+        fake_db_module = types.ModuleType("alert.db_config")
+        fake_db_module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+
+        with mock.patch.dict(sys.modules, {"alert.db_config": fake_db_module}), \
+            mock.patch.object(module, "log"):
+            alerts = module.step1_scan_alerts(now=datetime(2026, 5, 10, 10, 0, 0))
+
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["table"], "dwd_long_window_table")
+        self.assertEqual(alerts[0]["status"], "skipped_out_of_window")
+        self.assertIn("begin", alerts[0]["error"])
 
     def test_step5_execute_fuyan_accepts_workflow_name_style_config(self):
         module = load_module()
@@ -918,6 +951,54 @@ class RepairStrict7StepTests(unittest.TestCase):
         dt = module.resolve_alert_dt(row, now=datetime(2026, 4, 29, 10, 0, 0))
 
         self.assertEqual(dt, "2026-04-29")
+
+    def test_get_alert_window_status_uses_begin_end_window_for_lookback(self):
+        module = load_module()
+        row = {
+            "begin": datetime(2026, 2, 8, 0, 0, 0),
+            "end": datetime(2026, 5, 9, 0, 0, 0),
+        }
+
+        status = module.get_alert_window_status(row, now=datetime(2026, 5, 10, 10, 0, 0))
+
+        self.assertTrue(status["is_out_of_window"])
+        self.assertEqual(status["reason"], "begin_before_lookback")
+        self.assertEqual(status["begin_date"], "2026-02-08")
+        self.assertEqual(status["end_date"], "2026-05-09")
+
+    def test_get_remaining_alert_tables_excludes_out_of_window_rows_by_begin_end(self):
+        module = load_module()
+
+        rows = [
+            {
+                "src_db": "ods",
+                "src_tbl": "ods_long_window_table",
+                "dest_db": "dwd",
+                "dest_tbl": "dwd_long_window_table",
+                "begin": datetime(2026, 2, 8, 0, 0, 0),
+                "end": datetime(2026, 5, 9, 0, 0, 0),
+            },
+            {
+                "src_db": "ods",
+                "src_tbl": "ods_recent_table",
+                "dest_db": "dwd",
+                "dest_tbl": "dwd_recent_table",
+                "begin": datetime(2026, 5, 9, 0, 0, 0),
+                "end": datetime(2026, 5, 10, 0, 0, 0),
+            },
+        ]
+
+        fake_cursor = mock.MagicMock()
+        fake_cursor.fetchall.return_value = rows
+        fake_conn = mock.MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cursor
+        fake_db_module = types.ModuleType("alert.db_config")
+        fake_db_module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+
+        with mock.patch.dict(sys.modules, {"alert.db_config": fake_db_module}):
+            tables = module.get_remaining_alert_tables(now=datetime(2026, 5, 10, 10, 0, 0))
+
+        self.assertEqual(tables, {"dwd_recent_table"})
 
     def test_execute_repairs_in_batches_starts_all_tasks_in_single_round(self):
         module = load_module()

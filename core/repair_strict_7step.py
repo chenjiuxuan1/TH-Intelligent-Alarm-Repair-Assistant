@@ -604,6 +604,43 @@ def resolve_alert_dt(row, now=None):
     return now.strftime('%Y-%m-%d')
 
 
+def get_alert_window_status(row, now=None, lookback_days=None):
+    """根据告警 begin/end 窗口判断是否超出自动修复范围。"""
+    if now is None:
+        now = datetime.now()
+    if lookback_days is None:
+        lookback_days = SCAN_LOOKBACK_DAYS
+
+    lookback_start = now.date() - timedelta(days=lookback_days)
+    begin_time = normalize_to_datetime(row.get('begin'))
+    end_time = normalize_to_datetime(row.get('end'))
+    begin_date = begin_time.date() if begin_time else None
+    end_date = end_time.date() if end_time else None
+
+    status = {
+        'is_out_of_window': False,
+        'reason': '',
+        'begin_date': begin_date.isoformat() if begin_date else None,
+        'end_date': end_date.isoformat() if end_date else None,
+        'lookback_start': lookback_start.isoformat(),
+    }
+
+    if begin_date and begin_date < lookback_start:
+        status['is_out_of_window'] = True
+        status['reason'] = 'begin_before_lookback'
+        return status
+
+    if begin_date and end_date:
+        # end 常常是开区间的次日边界，这里按自然日跨度来控制自动修复范围。
+        covered_days = max((end_date - begin_date).days, 0)
+        if covered_days > lookback_days:
+            status['is_out_of_window'] = True
+            status['reason'] = 'window_span_exceeded'
+            return status
+
+    return status
+
+
 def is_alert_out_of_window(alert_dt, now=None, lookback_days=None):
     """按告警对应 dt 判断是否超过自动修复时间窗口。"""
     if now is None:
@@ -664,15 +701,18 @@ def count_remaining_alert_tables():
     return len(get_remaining_alert_tables())
 
 
-def get_remaining_alert_tables():
+def get_remaining_alert_tables(now=None):
     """查询当前数据库中仍未处理的去重告警表集合"""
+    if now is None:
+        now = datetime.now()
+
     from alert.db_config import get_db_connection
 
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
             sql = """
-                SELECT src_db, src_tbl, dest_db, dest_tbl
+                SELECT src_db, src_tbl, dest_db, dest_tbl, `begin`, `end`
                 FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
                 ORDER BY created_at DESC
@@ -686,8 +726,8 @@ def get_remaining_alert_tables():
 
     unique_tables = set()
     for row in rows:
-        dt = resolve_alert_dt(row)
-        if is_alert_out_of_window(dt):
+        window_status = get_alert_window_status(row, now=now)
+        if window_status['is_out_of_window']:
             continue
         table_name = resolve_repair_table(row)
         if table_name:
@@ -725,6 +765,7 @@ def step1_scan_alerts(now=None):
                 table_name = resolve_repair_table(row)
                 
                 dt = resolve_alert_dt(row, now=now)
+                window_status = get_alert_window_status(row, now=now)
                 alert = {
                     'id': row['id'],
                     'table': table_name,
@@ -732,12 +773,20 @@ def step1_scan_alerts(now=None):
                     'name': row.get('name', ''),
                     'diff': row.get('diff', '')
                 }
-                if is_alert_out_of_window(dt, now=now):
+                if window_status['is_out_of_window']:
+                    begin_text = window_status.get('begin_date') or '未知'
+                    end_text = window_status.get('end_date') or '未知'
                     alert['status'] = 'skipped_out_of_window'
-                    alert['error'] = (
-                        f"告警对应数据日期 {dt} 已超过自动修复窗口 {SCAN_LOOKBACK_DAYS}天，"
-                        "转人工处理"
-                    )
+                    if window_status['reason'] == 'begin_before_lookback':
+                        alert['error'] = (
+                            f"告警窗口 begin={begin_text}, end={end_text}，"
+                            f"begin 早于自动修复窗口起点 {window_status['lookback_start']}，转人工处理"
+                        )
+                    else:
+                        alert['error'] = (
+                            f"告警窗口 begin={begin_text}, end={end_text}，"
+                            f"覆盖天数超过自动修复窗口 {SCAN_LOOKBACK_DAYS}天，转人工处理"
+                        )
                 alerts.append(alert)
         
         conn.close()
