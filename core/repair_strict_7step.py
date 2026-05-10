@@ -604,6 +604,23 @@ def resolve_alert_dt(row, now=None):
     return now.strftime('%Y-%m-%d')
 
 
+def is_alert_out_of_window(alert_dt, now=None, lookback_days=None):
+    """按告警对应 dt 判断是否超过自动修复时间窗口。"""
+    if now is None:
+        now = datetime.now()
+    if lookback_days is None:
+        lookback_days = SCAN_LOOKBACK_DAYS
+    if not alert_dt:
+        return False
+
+    try:
+        dt_value = datetime.strptime(str(alert_dt), '%Y-%m-%d')
+    except ValueError:
+        return False
+
+    return (now.date() - dt_value.date()).days > lookback_days
+
+
 def get_table_layer_priority(db_name):
     """为不同数仓层级打分，分值越高越优先作为修复目标"""
     normalized = (db_name or '').strip().lower()
@@ -658,11 +675,9 @@ def get_remaining_alert_tables():
                 SELECT src_db, src_tbl, dest_db, dest_tbl
                 FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
-                  AND created_at >= DATE_SUB(NOW(), INTERVAL {scan_lookback_days} DAY)
                 ORDER BY created_at DESC
             """.format(
                 quality_result_table=QUALITY_RESULT_TABLE,
-                scan_lookback_days=SCAN_LOOKBACK_DAYS,
             )
             cursor.execute(sql)
             rows = cursor.fetchall()
@@ -671,6 +686,9 @@ def get_remaining_alert_tables():
 
     unique_tables = set()
     for row in rows:
+        dt = resolve_alert_dt(row)
+        if is_alert_out_of_window(dt):
+            continue
         table_name = resolve_repair_table(row)
         if table_name:
             unique_tables.add(table_name)
@@ -678,8 +696,11 @@ def get_remaining_alert_tables():
     return unique_tables
 
 
-def step1_scan_alerts():
+def step1_scan_alerts(now=None):
     """步骤1: 扫描告警"""
+    if now is None:
+        now = datetime.now()
+
     log("="*70)
     log("【步骤1】扫描告警")
     log("="*70)
@@ -693,11 +714,9 @@ def step1_scan_alerts():
                 SELECT id, name, src_db, src_tbl, dest_db, dest_tbl, `begin`, `end`, diff
                 FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
-                  AND created_at >= DATE_SUB(NOW(), INTERVAL {scan_lookback_days} DAY)
                 ORDER BY created_at DESC
             """.format(
                 quality_result_table=QUALITY_RESULT_TABLE,
-                scan_lookback_days=SCAN_LOOKBACK_DAYS,
             )
             cursor.execute(sql)
             rows = cursor.fetchall()
@@ -705,15 +724,21 @@ def step1_scan_alerts():
             for row in rows:
                 table_name = resolve_repair_table(row)
                 
-                dt = resolve_alert_dt(row)
-                
-                alerts.append({
+                dt = resolve_alert_dt(row, now=now)
+                alert = {
                     'id': row['id'],
                     'table': table_name,
                     'dt': dt,
                     'name': row.get('name', ''),
                     'diff': row.get('diff', '')
-                })
+                }
+                if is_alert_out_of_window(dt, now=now):
+                    alert['status'] = 'skipped_out_of_window'
+                    alert['error'] = (
+                        f"告警对应数据日期 {dt} 已超过自动修复窗口 {SCAN_LOOKBACK_DAYS}天，"
+                        "转人工处理"
+                    )
+                alerts.append(alert)
         
         conn.close()
         log(f"✅ 查询到 {len(alerts)} 条异常记录")
@@ -735,6 +760,10 @@ def step1_scan_alerts():
         log(f"  ✅ {alert['table']} (dt={alert['dt']})")
     if len(unique_alerts) > 5:
         log(f"  ... 还有 {len(unique_alerts)-5} 个")
+
+    out_of_window_count = sum(1 for alert in unique_alerts if alert.get('status') == 'skipped_out_of_window')
+    if out_of_window_count:
+        log(f"  ⚠️ 超出{SCAN_LOOKBACK_DAYS}天自动修复窗口: {out_of_window_count} 个")
     
     return unique_alerts
 
@@ -1115,7 +1144,7 @@ def step3_start_repair(tasks):
     return results, running_instances
 
 
-def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
+def step4_wait_and_check(running_instances, poll_interval=10, max_wait=60):
     """步骤4: 动态监控任务状态（每30秒检查一次）- 修复版（增加失败次数限制）"""
     if not running_instances:
         log("\n  没有需要等待的任务")
@@ -1126,7 +1155,7 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
     log("="*70)
     log(f"  共 {len(running_instances)} 个任务")
     log(f"  轮询间隔: {poll_interval}秒")
-    log(f"  最大等待: {max_wait}秒 (30分钟)")
+    log(f"  最大等待: {max_wait}秒")
     
     start_time = time.time()
     completed_tasks = []
@@ -1238,11 +1267,11 @@ def step4_wait_and_check(running_instances, poll_interval=30, max_wait=1800):
                     f"实例查询失败 table={table} instance_id={item['instance_id']} "
                     f"diagnostics={json.dumps(diagnostics, ensure_ascii=False)}"
                 )
-                # 刚启动后的短时间内，DS 详情接口可能还查不到实例，避免过早误判失败。
-                if item['fail_count'] >= 3 and instance_age >= 180:
-                    log(f"  ❌ {table}: 查询失败超过3次，标记为失败 ({msg})")
-                    item['task']['final_status'] = 'failed'
-                    item['task']['error'] = f"查询失败: {msg}"
+                # 超过 60s 还无法拿到明确状态则直接判失败，避免流程长期卡住。
+                if instance_age >= max_wait:
+                    log(f"  ❌ {table}: 超过{max_wait}秒仍未获取到明确状态 ({msg})")
+                    item['task']['final_status'] = 'timeout'
+                    item['task']['error'] = f"超过{max_wait}秒未获取到明确状态: {msg}"
                     failed_tasks.append(item['task'])
                     status_changed = True
                 else:
@@ -1311,47 +1340,15 @@ def split_ready_and_blocked_tasks(tasks, in_flight_keys):
     return ready_tasks, blocked_tasks
 
 
-def execute_repairs_in_batches(tasks, max_parallel=5):
-    """分批执行修复任务，控制同时运行的实例数量，并让同一子任务串行排队"""
-    if max_parallel <= 0:
-        raise ValueError("max_parallel must be greater than 0")
+def execute_repairs_in_batches(tasks):
+    """统一启动所有待修复任务，再统一等待全部任务完成。"""
+    log("\n" + "=" * 70)
+    log(f"【统一执行】准备启动 {len(tasks)} 个修复任务")
+    log("=" * 70)
 
-    all_results = []
-    all_completed_tasks = []
-    all_failed_tasks = []
-    pending_queue = list(tasks)
-    in_flight_keys = set()
-    batch_index = 0
-
-    while pending_queue:
-        ready_tasks, blocked_tasks = split_ready_and_blocked_tasks(pending_queue, in_flight_keys)
-        if not ready_tasks:
-            ready_tasks = [pending_queue[0]]
-            blocked_tasks = pending_queue[1:]
-
-        batch_tasks = ready_tasks[:max_parallel]
-        remaining_ready = ready_tasks[max_parallel:]
-        pending_queue = remaining_ready + blocked_tasks
-        batch_index += 1
-        batch_task_keys = {
-            get_task_execution_key(task)
-            for task in batch_tasks
-            if task.get('workflow_code') and task.get('task_code')
-        }
-        log("\n" + "=" * 70)
-        log(f"【批次 {batch_index}】执行 {len(batch_tasks)} 个修复任务")
-        log("=" * 70)
-
-        batch_results, running_instances = step3_start_repair(batch_tasks)
-        in_flight_keys.update(batch_task_keys)
-        completed_tasks, failed_tasks = step4_wait_and_check(running_instances)
-        in_flight_keys.difference_update(batch_task_keys)
-
-        all_results.extend(batch_results)
-        all_completed_tasks.extend(completed_tasks)
-        all_failed_tasks.extend(failed_tasks)
-
-    return all_results, all_completed_tasks, all_failed_tasks
+    all_results, running_instances = step3_start_repair(tasks)
+    completed_tasks, failed_tasks = step4_wait_and_check(running_instances)
+    return all_results, completed_tasks, failed_tasks
 
 
 def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
@@ -1427,7 +1424,7 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
     return fuyan_results
 
 
-def wait_for_fuyan_results(fuyan_results, poll_interval=30, max_wait=1800):
+def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
     """等待已启动的复验工作流完成，补充最终状态"""
     running_results = [
         dict(item)
@@ -1469,6 +1466,7 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=30, max_wait=1800):
 
         pending = still_pending
         if pending:
+            log(f"  复验仍在等待: {len(pending)} 个，{poll_interval}秒后继续检查")
             time.sleep(poll_interval)
 
     for item in pending.values():
@@ -1744,10 +1742,21 @@ def main():
 
     # 策略判断：疑似冗余数据告警首次允许重跑，后续转人工处理
     strategy_state = load_manual_review_state()
-    runnable_tasks, manual_review_tasks = apply_repair_strategy(tasks, strategy_state)
+    out_of_window_tasks = []
+    candidate_tasks = []
+    for task in tasks:
+        if task.get('status') == 'skipped_out_of_window':
+            manual_task = dict(task)
+            manual_task['status'] = 'skipped_manual_review'
+            out_of_window_tasks.append(manual_task)
+        else:
+            candidate_tasks.append(task)
+
+    runnable_tasks, manual_review_tasks = apply_repair_strategy(candidate_tasks, strategy_state)
+    manual_review_tasks = out_of_window_tasks + manual_review_tasks
     
-    # 步骤3-4: 分批启动修复并动态监控（最多并行5个）
-    results, completed_tasks, failed_tasks = execute_repairs_in_batches(runnable_tasks, max_parallel=5)
+    # 步骤3-4: 统一启动修复并动态监控
+    results, completed_tasks, failed_tasks = execute_repairs_in_batches(runnable_tasks)
 
     record_redundant_retry_attempt(strategy_state, completed_tasks)
     record_manual_review_tasks(strategy_state, manual_review_tasks)

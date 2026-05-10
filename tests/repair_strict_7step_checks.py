@@ -2,7 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest import mock
 
 
@@ -74,6 +74,38 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(module.MANUAL_REVIEW_STATE_FILE, "/tmp/default-workspace/auto_repair_records/manual_review_state.json")
         self.assertEqual(module.SCAN_LOOKBACK_DAYS, 7)
         self.assertEqual(module.FUYAN_WORKFLOWS, [{"name": "默认复验", "code": "wf-default", "level": "all"}])
+
+    def test_step1_scan_alerts_marks_out_of_window_alert_as_manual_review(self):
+        module = load_module()
+        rows = [
+            {
+                "id": 1,
+                "name": "old alert",
+                "src_db": "dwd",
+                "src_tbl": "dwd_old_table",
+                "dest_db": "dwd",
+                "dest_tbl": "dwd_old_table",
+                "begin": datetime(2026, 4, 20, 0, 0, 0),
+                "end": datetime(2026, 4, 21, 0, 0, 0),
+                "diff": 1,
+            }
+        ]
+
+        fake_cursor = mock.MagicMock()
+        fake_cursor.fetchall.return_value = rows
+        fake_conn = mock.MagicMock()
+        fake_conn.cursor.return_value.__enter__.return_value = fake_cursor
+        fake_db_module = types.ModuleType("alert.db_config")
+        fake_db_module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+
+        with mock.patch.dict(sys.modules, {"alert.db_config": fake_db_module}), \
+            mock.patch.object(module, "log"):
+            alerts = module.step1_scan_alerts(now=datetime(2026, 5, 10, 10, 0, 0))
+
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["table"], "dwd_old_table")
+        self.assertEqual(alerts[0]["status"], "skipped_out_of_window")
+        self.assertIn("7天", alerts[0]["error"])
 
     def test_step5_execute_fuyan_accepts_workflow_name_style_config(self):
         module = load_module()
@@ -332,10 +364,10 @@ class RepairStrict7StepTests(unittest.TestCase):
         with mock.patch.object(module, "step3_start_repair", side_effect=fake_step3), mock.patch.object(
             module, "step4_wait_and_check", side_effect=fake_wait
         ), mock.patch.object(module, "log"):
-            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks, max_parallel=5)
+            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks)
 
-        self.assertEqual(step3_batches, [["2026-05-10"], ["2026-05-11"]])
-        self.assertEqual(waited_instances, [[2011], [2021]])
+        self.assertEqual(step3_batches, [["2026-05-10", "2026-05-11"]])
+        self.assertEqual(waited_instances, [[2011, 2012]])
         self.assertEqual(len(results), 2)
         self.assertEqual(len(completed_tasks), 2)
         self.assertEqual(failed_tasks, [])
@@ -398,10 +430,10 @@ class RepairStrict7StepTests(unittest.TestCase):
         with mock.patch.object(module, "step3_start_repair", side_effect=fake_step3), mock.patch.object(
             module, "step4_wait_and_check", side_effect=fake_step4
         ), mock.patch.object(module, "log"):
-            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks, max_parallel=2)
+            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks)
 
-        self.assertEqual(step3_batches, [["table_a", "table_b"], ["table_c"]])
-        self.assertEqual(step4_calls, [["table_a", "table_b"], ["table_c"]])
+        self.assertEqual(step3_batches, [["table_a", "table_b", "table_c"]])
+        self.assertEqual(step4_calls, [["table_a", "table_b", "table_c"]])
         self.assertEqual(len(results), 3)
         self.assertEqual(completed_tasks, [])
         self.assertEqual(len(failed_tasks), 3)
@@ -887,7 +919,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(dt, "2026-04-29")
 
-    def test_execute_repairs_in_batches_limits_parallel_work_to_five(self):
+    def test_execute_repairs_in_batches_starts_all_tasks_in_single_round(self):
         module = load_module()
         tasks = [{"table": f"table_{idx}", "dt": "2026-04-26"} for idx in range(12)]
         step3_calls = []
@@ -919,20 +951,51 @@ class RepairStrict7StepTests(unittest.TestCase):
         with mock.patch.object(module, "step3_start_repair", side_effect=fake_step3), mock.patch.object(
             module, "step4_wait_and_check", side_effect=fake_step4
         ):
-            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks, max_parallel=5)
+            results, completed_tasks, failed_tasks = module.execute_repairs_in_batches(tasks)
 
         self.assertEqual(
             step3_calls,
-            [
-                ["table_0", "table_1", "table_2", "table_3", "table_4"],
-                ["table_5", "table_6", "table_7", "table_8", "table_9"],
-                ["table_10", "table_11"],
-            ],
+            [[f"table_{idx}" for idx in range(12)]],
         )
         self.assertEqual(step4_calls, step3_calls)
         self.assertEqual(len(results), 12)
         self.assertEqual(len(completed_tasks), 12)
         self.assertEqual(failed_tasks, [])
+
+    def test_step4_wait_and_check_uses_sixty_second_timeout(self):
+        module = load_module()
+        running_instances = [
+            {
+                "table": "table_a",
+                "instance_id": 12345,
+                "workflow_code": "wf-a",
+                "task": {
+                    "table": "table_a",
+                    "instance_id": 12345,
+                    "workflow_code": "wf-a",
+                    "launched_at": "2026-05-10 10:00:00",
+                },
+            }
+        ]
+
+        fake_times = iter([0, 0, 30, 30, 61, 61, 61])
+
+        with mock.patch.object(module, "find_recent_instance_by_workflow", return_value={}), \
+            mock.patch.object(module, "get_instance_detail", return_value=(False, {}, "query failed")), \
+            mock.patch.object(module, "get_instance_from_list", return_value={}), \
+            mock.patch.object(module, "collect_instance_query_diagnostics", return_value={}), \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"), \
+            mock.patch("time.time", side_effect=lambda: next(fake_times)):
+            completed, failed = module.step4_wait_and_check(
+                running_instances,
+                poll_interval=30,
+                max_wait=60,
+            )
+
+        self.assertEqual(completed, [])
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["final_status"], "timeout")
 
     def test_apply_repair_strategy_allows_first_retry_for_suspected_redundant_data(self):
         module = load_module()
@@ -1035,7 +1098,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(count, 2)
 
-    def test_count_remaining_alert_tables_queries_configured_result_table(self):
+    def test_count_remaining_alert_tables_queries_configured_result_table_without_created_at_cutoff(self):
         module = load_module()
 
         fake_cursor = mock.MagicMock()
@@ -1050,7 +1113,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         executed_sql = fake_cursor.execute.call_args[0][0]
         self.assertIn("FROM default_quality_result", executed_sql)
-        self.assertIn("INTERVAL 7 DAY", executed_sql)
+        self.assertNotIn("INTERVAL 7 DAY", executed_sql)
 
     def test_step5_execute_fuyan_skips_when_no_completed_repairs(self):
         module = load_module()
