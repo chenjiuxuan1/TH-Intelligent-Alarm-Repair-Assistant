@@ -20,6 +20,11 @@ def load_module():
         "fuyan_project_code": "default-fuyan-project",
         "environment_code": "10001",
         "tenant_code": "tenant_default",
+        "api_mode": "auto",
+        "start_endpoint": "auto",
+        "start_code_field": "auto",
+        "definition_endpoint_style": "auto",
+        "instance_endpoint_style": "auto",
     }
     fake_config_config.WORKSPACE_CONFIG = {
         "root": "/tmp/default-workspace",
@@ -145,7 +150,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(result["workflow_name"], "DWD")
         self.assertEqual(result["task_code"], "task-1")
 
-    def test_step3_start_repair_uses_ds32_compatible_start_payload(self):
+    def test_step3_start_repair_uses_process_style_start_payload_by_default(self):
         module = load_module()
         tasks = [
             {
@@ -181,6 +186,72 @@ class RepairStrict7StepTests(unittest.TestCase):
         )
         self.assertEqual(results[0]["instance_id"], 12345)
         self.assertEqual(running_instances[0]["instance_id"], 12345)
+
+    def test_step3_start_repair_falls_back_to_workflow_style_start_when_process_style_fails(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "dwd_fox_mission_log",
+                "dt": "2026-04-29",
+                "workflow_code": "wf-1",
+                "workflow_name": "DWD",
+                "task_code": "task-1",
+                "task_name": "dwd_fox_mission_log",
+            }
+        ]
+        attempts = []
+
+        def fake_ds_api_post(endpoint, data):
+            attempts.append((endpoint, dict(data)))
+            if endpoint.endswith("start-process-instance"):
+                return False, {}, "process style unsupported"
+            return True, {"data": [67890]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(attempts[0][0].endswith("start-process-instance"))
+        self.assertEqual(attempts[0][1]["processDefinitionCode"], "wf-1")
+        self.assertTrue(attempts[1][0].endswith("start-workflow-instance"))
+        self.assertEqual(attempts[1][1]["workflowDefinitionCode"], "wf-1")
+        self.assertEqual(results[0]["instance_id"], 67890)
+        self.assertEqual(running_instances[0]["instance_id"], 67890)
+
+    def test_step3_start_repair_uses_configured_workflow_style_start_mode(self):
+        module = load_module()
+        module.DS_START_ENDPOINT = "start-workflow-instance"
+        module.DS_START_CODE_FIELD = "workflowDefinitionCode"
+        tasks = [
+            {
+                "table": "dwd_fox_mission_log",
+                "dt": "2026-04-29",
+                "workflow_code": "wf-1",
+                "workflow_name": "DWD",
+                "task_code": "task-1",
+                "task_name": "dwd_fox_mission_log",
+            }
+        ]
+        captured = {}
+
+        def fake_ds_api_post(endpoint, data):
+            captured["endpoint"] = endpoint
+            captured["data"] = dict(data)
+            return True, {"data": [45678]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        self.assertEqual(captured["endpoint"], "/projects/default-project/executors/start-workflow-instance")
+        self.assertEqual(captured["data"]["workflowDefinitionCode"], "wf-1")
+        self.assertNotIn("processDefinitionCode", captured["data"])
+        self.assertEqual(captured["data"]["scheduleTime"], "2026-04-29 00:00:00" if False else captured["data"]["scheduleTime"])
+        self.assertEqual(results[0]["instance_id"], 45678)
+        self.assertEqual(running_instances[0]["instance_id"], 45678)
 
     def test_step3_start_repair_skips_when_workflow_has_running_instance(self):
         module = load_module()
@@ -448,28 +519,26 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(completed[0]["final_status"], "success")
         self.assertEqual(failed, [])
 
-    def test_step3_start_repair_replaces_unqueryable_returned_id_with_recent_real_instance_id(self):
+    def test_get_instance_detail_uses_configured_process_instance_style(self):
         module = load_module()
-        tasks = [
-            {
-                "table": "ods_app_product",
-                "dt": "2026-05-10",
-                "workflow_code": "wf-app",
-                "workflow_name": "ODS_APP_COCONUT_FULL",
-                "task_code": "task-app",
-                "task_name": "ods_app_product",
-            }
-        ]
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+        seen_endpoints = []
 
-        with mock.patch.object(module, "find_conflicting_running_instance", return_value=None), \
-            mock.patch.object(module, "ds_api_post", return_value=(True, {"data": [11111]}, "")), \
-            mock.patch.object(module, "resolve_started_instance", return_value={"id": 22222, "state": "RUNNING_EXECUTION"}), \
-            mock.patch.object(module, "log"), \
-            mock.patch("time.sleep"):
-            results, running_instances = module.step3_start_repair(tasks)
+        def fake_ds_api_get(endpoint):
+            seen_endpoints.append(endpoint)
+            if endpoint == "/projects/default-project/process-instances/12345":
+                return True, {"id": 12345, "state": "RUNNING_EXECUTION"}, ""
+            return False, {}, "wrong endpoint"
 
-        self.assertEqual(results[0]["instance_id"], 22222)
-        self.assertEqual(running_instances[0]["instance_id"], 22222)
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_instance_detail("default-project", 12345)
+
+        self.assertTrue(success)
+        self.assertEqual(data["id"], 12345)
+        self.assertEqual(
+            seen_endpoints,
+            ["/projects/default-project/process-instances/12345"],
+        )
 
     def test_step2_find_locations_falls_back_to_process_definition_list_for_ds32(self):
         module = load_module()

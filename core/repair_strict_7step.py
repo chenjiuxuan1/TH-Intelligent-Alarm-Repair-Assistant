@@ -33,6 +33,11 @@ FUYAN_PROJECT_CODE = DS_CONFIG['fuyan_project_code']
 DS_TOKEN = DS_CONFIG['token']
 DS_ENVIRONMENT_CODE = DS_CONFIG['environment_code']
 DS_TENANT_CODE = DS_CONFIG['tenant_code']
+DS_API_MODE = DS_CONFIG.get('api_mode', 'auto')
+DS_START_ENDPOINT = DS_CONFIG.get('start_endpoint', 'auto')
+DS_START_CODE_FIELD = DS_CONFIG.get('start_code_field', 'auto')
+DS_DEFINITION_ENDPOINT_STYLE = DS_CONFIG.get('definition_endpoint_style', 'auto')
+DS_INSTANCE_ENDPOINT_STYLE = DS_CONFIG.get('instance_endpoint_style', 'auto')
 QUALITY_RESULT_TABLE = TABLE_CONFIG['quality_result_table']
 MANUAL_REVIEW_STATE_FILE = WORKSPACE_CONFIG['manual_review_state_file']
 SCAN_LOOKBACK_DAYS = REPAIR_CONFIG['scan_lookback_days']
@@ -48,12 +53,67 @@ def debug_log(msg):
         log(f"[DS-DEBUG] {msg}")
 
 
+def _get_definition_detail_endpoints(project_code, workflow_code):
+    if DS_DEFINITION_ENDPOINT_STYLE == 'workflow-definition':
+        return [f"/projects/{project_code}/workflow-definition/{workflow_code}"]
+    if DS_DEFINITION_ENDPOINT_STYLE == 'process-definition':
+        return [f"/projects/{project_code}/process-definition/{workflow_code}"]
+    return [
+        f"/projects/{project_code}/workflow-definition/{workflow_code}",
+        f"/projects/{project_code}/process-definition/{workflow_code}",
+    ]
+
+
+def _get_definition_list_endpoint_templates():
+    if DS_DEFINITION_ENDPOINT_STYLE == 'workflow-definition':
+        return ["/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100"]
+    if DS_DEFINITION_ENDPOINT_STYLE == 'process-definition':
+        return ["/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100"]
+    return [
+        "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
+        "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+    ]
+
+
+def _get_instance_detail_endpoints(project_code, instance_id):
+    if DS_INSTANCE_ENDPOINT_STYLE == 'workflow-instances':
+        return [f"/projects/{project_code}/workflow-instances/{instance_id}"]
+    if DS_INSTANCE_ENDPOINT_STYLE == 'process-instances':
+        return [f"/projects/{project_code}/process-instances/{instance_id}"]
+    return [
+        f"/projects/{project_code}/workflow-instances/{instance_id}",
+        f"/projects/{project_code}/process-instances/{instance_id}",
+    ]
+
+
+def _get_instance_list_styles():
+    if DS_INSTANCE_ENDPOINT_STYLE == 'workflow-instances':
+        return ['workflow-instances']
+    if DS_INSTANCE_ENDPOINT_STYLE == 'process-instances':
+        return ['process-instances']
+    return ['workflow-instances', 'process-instances']
+
+
+def _get_start_attempts():
+    if DS_START_ENDPOINT != 'auto' or DS_START_CODE_FIELD != 'auto':
+        endpoint = DS_START_ENDPOINT if DS_START_ENDPOINT != 'auto' else 'start-process-instance'
+        code_field = DS_START_CODE_FIELD if DS_START_CODE_FIELD != 'auto' else 'processDefinitionCode'
+        return [(endpoint, code_field)]
+
+    if DS_API_MODE == 'workflow_v1':
+        return [('start-workflow-instance', 'workflowDefinitionCode')]
+    if DS_API_MODE == 'process_v2':
+        return [('start-process-instance', 'processDefinitionCode')]
+
+    return [
+        ('start-process-instance', 'processDefinitionCode'),
+        ('start-workflow-instance', 'workflowDefinitionCode'),
+    ]
+
+
 def get_workflow_definition_detail(workflow_code):
     """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 详情接口"""
-    endpoints = [
-        f"/projects/{PROJECT_CODE}/workflow-definition/{workflow_code}",
-        f"/projects/{PROJECT_CODE}/process-definition/{workflow_code}",
-    ]
+    endpoints = _get_definition_detail_endpoints(PROJECT_CODE, workflow_code)
     last_msg = ""
     for endpoint in endpoints:
         success, detail, msg = ds_api_get(endpoint)
@@ -65,10 +125,7 @@ def get_workflow_definition_detail(workflow_code):
 
 def get_workflow_definition_list():
     """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 列表接口，并自动翻页"""
-    endpoint_templates = [
-        "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
-        "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
-    ]
+    endpoint_templates = _get_definition_list_endpoint_templates()
     last_msg = ""
 
     for endpoint_template in endpoint_templates:
@@ -130,10 +187,7 @@ def get_schedule_map():
 
 def get_instance_detail(project_code, instance_id):
     """兼容 DS 3.3 workflow-instances 与 DS 3.2 process-instances 详情接口"""
-    endpoints = [
-        f"/projects/{project_code}/workflow-instances/{instance_id}",
-        f"/projects/{project_code}/process-instances/{instance_id}",
-    ]
+    endpoints = _get_instance_detail_endpoints(project_code, instance_id)
     last_msg = ""
     for endpoint in endpoints:
         success, data, msg = ds_api_get(endpoint)
@@ -148,8 +202,8 @@ def _build_instance_list_endpoints(project_code, state_type=None, page_no=1, pag
     if state_type:
         suffix += f"&stateType={state_type}"
     return [
-        f"/projects/{project_code}/workflow-instances{suffix}",
-        f"/projects/{project_code}/process-instances{suffix}",
+        f"/projects/{project_code}/{style}{suffix}"
+        for style in _get_instance_list_styles()
     ]
 
 
@@ -197,10 +251,7 @@ def get_all_instances_from_lists(project_code, state_type='ALL'):
     seen_keys = set()
     last_errors = []
 
-    for endpoint_template in (
-        "workflow-instances",
-        "process-instances",
-    ):
+    for endpoint_template in _get_instance_list_styles():
         page_no = 1
         total_pages = 1
 
@@ -306,31 +357,10 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
     return candidates[0]
 
 
-def resolve_started_instance(project_code, workflow_code, launched_at=None):
-    """任务刚启动后，尽量把返回值解析成可查询的真实实例 ID"""
-    for attempt in range(1, 4):
-        instance = find_recent_instance_by_workflow(
-            project_code,
-            workflow_code,
-            launched_at=launched_at,
-            state_types=('RUNNING_EXECUTION', 'READY_STOP', 'SUCCESS', 'FINISHED', 'ALL', None),
-        )
-        if instance:
-            if attempt > 1:
-                debug_log(f"第 {attempt} 次反查命中真实实例 ID {instance.get('id')}")
-            return instance
-        if attempt < 3:
-            time.sleep(1)
-    return {}
-
-
 def collect_instance_query_diagnostics(project_code, instance_id, workflow_code=None, launched_at=None):
     """收集当前实例状态查询诊断信息，便于线上排查不同 DS 版本差异。"""
     detail_results = []
-    for endpoint in (
-        f"/projects/{project_code}/workflow-instances/{instance_id}",
-        f"/projects/{project_code}/process-instances/{instance_id}",
-    ):
+    for endpoint in _get_instance_detail_endpoints(project_code, instance_id):
         success, data, msg = ds_api_get(endpoint)
         detail_results.append(
             {
@@ -380,10 +410,12 @@ def collect_instance_query_diagnostics(project_code, instance_id, workflow_code=
 
 def get_running_instances_by_workflow(project_code, workflow_code):
     """查询指定工作流当前是否已有运行中的实例，用于避开调度执行窗口"""
-    endpoints = [
-        f"/projects/{project_code}/workflow-instances?pageNo=1&pageSize=100&stateType=RUNNING_EXECUTION",
-        f"/projects/{project_code}/process-instances?pageNo=1&pageSize=100&stateType=RUNNING_EXECUTION",
-    ]
+    endpoints = _build_instance_list_endpoints(
+        project_code=project_code,
+        state_type='RUNNING_EXECUTION',
+        page_no=1,
+        page_size=100,
+    )
     workflow_code_str = str(workflow_code)
 
     for endpoint in endpoints:
@@ -997,8 +1029,7 @@ def step3_start_repair(tasks):
             continue
         
         # 启动修复
-        data = {
-            'processDefinitionCode': workflow_code,
+        base_data = {
             'startNodeList': task_code,
             'taskDependType': 'TASK_ONLY',
             'failureStrategy': 'CONTINUE',
@@ -1009,11 +1040,31 @@ def step3_start_repair(tasks):
             'environmentCode': DS_ENVIRONMENT_CODE,
             'tenantCode': DS_TENANT_CODE,
             'dryRun': 0,
-            'scheduleTime': ''
         }
-        
-        success, result, msg = ds_api_post(f"/projects/{PROJECT_CODE}/executors/start-process-instance", data)
-        
+        launched_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        start_attempts = _get_start_attempts()
+        success = False
+        result = {}
+        msg = ''
+        used_endpoint = ''
+        used_payload = {}
+        for start_endpoint, code_field in start_attempts:
+            attempt_data = dict(base_data)
+            attempt_data[code_field] = workflow_code
+            attempt_data['scheduleTime'] = launched_at if start_endpoint == 'start-workflow-instance' else ''
+            used_endpoint = f"/projects/{PROJECT_CODE}/executors/{start_endpoint}"
+            used_payload = attempt_data
+            debug_log(
+                f"尝试启动 table={table} endpoint={used_endpoint} code_field={code_field}"
+            )
+            success, result, msg = ds_api_post(used_endpoint, attempt_data)
+            if success:
+                break
+            debug_log(
+                f"启动失败 table={table} endpoint={used_endpoint} msg={msg or result.get('msg', '')}"
+            )
+
         if success:
             instance_data = result.get('data')
             # DS 3.3.0 返回的是数组格式 [id]，需要取第一个元素
@@ -1021,17 +1072,10 @@ def step3_start_repair(tasks):
                 instance_id = instance_data[0]
             else:
                 instance_id = instance_data
-            launched_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             debug_log(
-                f"启动返回原始结果 table={table} workflow_code={workflow_code} "
-                f"task_code={task_code} raw_data={instance_data}"
+                f"启动成功 table={table} endpoint={used_endpoint} payload_keys={sorted(used_payload.keys())} "
+                f"raw_data={instance_data}"
             )
-            resolved_instance = resolve_started_instance(PROJECT_CODE, workflow_code, launched_at=launched_at)
-            if resolved_instance.get('id') is not None:
-                resolved_instance_id = resolved_instance.get('id')
-                if str(resolved_instance_id) != str(instance_id):
-                    log(f"  ℹ️ 启动返回ID {instance_id}，已映射到真实实例ID {resolved_instance_id}")
-                instance_id = resolved_instance_id
             log(f"  ✅ 启动成功，实例ID: {instance_id}")
             task['status'] = 'success'
             task['instance_id'] = instance_id
@@ -1043,7 +1087,7 @@ def step3_start_repair(tasks):
                 'task': task
             })
         else:
-            error_msg = result.get('msg', '未知错误')
+            error_msg = result.get('msg', msg or '未知错误')
             log(f"  ❌ 启动失败: {error_msg}")
             task['status'] = 'failed'
             task['error'] = error_msg
