@@ -160,6 +160,40 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["name"], "每日复验全级别数据(W-1)")
         self.assertEqual(results[0]["id"], 12345)
 
+    def test_step5_execute_fuyan_uses_workflow_specific_project_code(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {
+                "project_name": "印尼数仓-数据质量",
+                "project_code": "project-fuyan-a",
+                "workflow_name": "每日复验全级别数据(W-1)",
+                "workflow_code": "wf-1",
+                "level": "全级别",
+            }
+        ]
+        captured = {}
+
+        def fake_ds_api_post(endpoint, data):
+            captured["endpoint"] = endpoint
+            captured["data"] = data
+            return True, {"data": [12345]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
+            results = module.step5_execute_fuyan([{"table": "dwd_fox_mission_log"}], [], [])
+
+        self.assertEqual(captured["endpoint"], "/projects/project-fuyan-a/executors/start-process-instance")
+        self.assertEqual(results[0]["project_code"], "project-fuyan-a")
+
+    def test_get_fuyan_project_code_prefers_workflow_specific_value(self):
+        module = load_module()
+
+        workflow = {
+            "project_code": "project-fuyan-a",
+            "workflow_code": "wf-1",
+        }
+
+        self.assertEqual(module.get_fuyan_project_code(workflow), "project-fuyan-a")
+
     def test_step5_execute_fuyan_selects_daily_and_level3_for_non_dwb_tables(self):
         module = load_module()
         module.FUYAN_WORKFLOWS = [
@@ -1578,6 +1612,51 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(final_results[0]["id"], 33333)
         self.assertEqual(final_results[0]["final_status"], "success")
         self.assertEqual(final_results[0]["end_time"], "2026-05-11 09:36:40")
+
+    def test_wait_for_fuyan_results_uses_workflow_specific_project_code_for_queries(self):
+        module = load_module()
+        fuyan_results = [
+            {
+                "name": "每日复验全级别数据(W-1)",
+                "status": "success",
+                "id": 11111,
+                "workflow_code": "wf-fuyan",
+                "project_code": "project-fuyan-a",
+                "launched_at": "2026-05-11 09:35:44",
+            }
+        ]
+        seen_project_codes = []
+
+        def fake_get_instance_detail(project_code, instance_id):
+            seen_project_codes.append(("detail", project_code, instance_id))
+            return True, {"id": instance_id, "state": "SUCCESS", "endTime": "2026-05-11 09:36:40"}, ""
+
+        def fake_find_recent_instance_by_workflow(project_code, workflow_code, launched_at=None, state_types=None):
+            seen_project_codes.append(("recent", project_code, workflow_code))
+            return {"id": 11111, "state": "RUNNING_EXECUTION"}
+
+        with mock.patch.object(
+            module,
+            "find_recent_instance_by_workflow",
+            side_effect=fake_find_recent_instance_by_workflow,
+        ), mock.patch.object(
+            module,
+            "get_instance_detail",
+            side_effect=fake_get_instance_detail,
+        ), mock.patch.object(
+            module,
+            "get_instance_from_list",
+            return_value={},
+        ), mock.patch.object(module, "log"), mock.patch("time.sleep"):
+            final_results = module.wait_for_fuyan_results(
+                fuyan_results,
+                poll_interval=1,
+                max_wait=10,
+            )
+
+        self.assertEqual(final_results[0]["final_status"], "success")
+        self.assertIn(("recent", "project-fuyan-a", "wf-fuyan"), seen_project_codes)
+        self.assertIn(("detail", "project-fuyan-a", 11111), seen_project_codes)
 
     def test_generate_tv_report_uses_display_pending_tables_count_when_present(self):
         module = load_module()

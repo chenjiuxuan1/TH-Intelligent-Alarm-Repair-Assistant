@@ -493,6 +493,10 @@ def get_fuyan_code(workflow):
     return workflow.get('code') or workflow.get('workflow_code') or ''
 
 
+def get_fuyan_project_code(workflow):
+    return workflow.get('project_code') or workflow.get('fuyan_project_code') or FUYAN_PROJECT_CODE
+
+
 def normalize_fuyan_level(workflow):
     level = (workflow.get('level') or '').strip().lower()
     if level in {'all', '全级别'}:
@@ -1450,6 +1454,7 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
     for i, fuyan in enumerate(fuyan_workflows, 1):
         fuyan_name = get_fuyan_name(fuyan)
         fuyan_code = get_fuyan_code(fuyan)
+        fuyan_project_code = get_fuyan_project_code(fuyan)
         log(f"  [{i}] {fuyan_name}")
         
         data = {
@@ -1468,7 +1473,7 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
             'scheduleTime': ''
         }
         
-        success, result, msg = ds_api_post(f"/projects/{FUYAN_PROJECT_CODE}/executors/start-process-instance", data)
+        success, result, msg = ds_api_post(f"/projects/{fuyan_project_code}/executors/start-process-instance", data)
         if success:
             instance_id = result.get('data')
             if isinstance(instance_id, list) and len(instance_id) > 0:
@@ -1482,6 +1487,7 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
                 'start_response_id': instance_id,
                 'resolved_instance_id': None,
                 'workflow_code': fuyan_code,
+                'project_code': fuyan_project_code,
                 'launched_at': launched_at,
             })
         else:
@@ -1513,11 +1519,12 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
             current_instance_id = item.get('resolved_instance_id') or item.get('id')
             workflow_code = item.get('workflow_code')
             launched_at = item.get('launched_at')
+            fuyan_project_code = item.get('project_code') or FUYAN_PROJECT_CODE
             discovered_instance = {}
 
             if not item.get('resolved_instance_id') and workflow_code:
                 discovered_instance = find_recent_instance_by_workflow(
-                    FUYAN_PROJECT_CODE,
+                    fuyan_project_code,
                     workflow_code,
                     launched_at=launched_at,
                 )
@@ -1531,9 +1538,9 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
                         f"resolved_instance_id={resolved_instance_id}"
                     )
 
-            success, data, msg = get_instance_detail(FUYAN_PROJECT_CODE, current_instance_id)
+            success, data, msg = get_instance_detail(fuyan_project_code, current_instance_id)
             if not success or not data:
-                fallback_data = get_instance_from_list(FUYAN_PROJECT_CODE, current_instance_id)
+                fallback_data = get_instance_from_list(fuyan_project_code, current_instance_id)
                 if fallback_data:
                     success = True
                     data = fallback_data
@@ -1544,7 +1551,7 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
                     msg = ''
                 elif workflow_code:
                     recent_instance = find_recent_instance_by_workflow(
-                        FUYAN_PROJECT_CODE,
+                        fuyan_project_code,
                         workflow_code,
                         launched_at=launched_at,
                     )
@@ -1558,7 +1565,7 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
             if not success or not data:
                 instance_age = time.time() - item.get('first_seen_at', start_time)
                 diagnostics = collect_instance_query_diagnostics(
-                    FUYAN_PROJECT_CODE,
+                    fuyan_project_code,
                     instance_id=item.get('id'),
                     workflow_code=workflow_code,
                     launched_at=launched_at,
