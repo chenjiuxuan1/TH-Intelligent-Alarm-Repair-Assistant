@@ -676,42 +676,20 @@ def is_alert_out_of_window(alert_dt, now=None, lookback_days=None):
     return (now.date() - dt_value.date()).days > lookback_days
 
 
-def get_table_layer_priority(db_name):
-    """为不同数仓层级打分，分值越高越优先作为修复目标"""
-    normalized = (db_name or '').strip().lower()
-    priorities = {
-        'ads': 4,
-        'dm': 3,
-        'dwd': 2,
-        'dwb': 2,
-        'ods': 1,
-    }
-    return priorities.get(normalized, 0)
-
-
 def resolve_repair_table(row):
-    """统一决定当前告警应该修复哪张表，尽量优先目标层和下游层"""
-    src_db = row.get('src_db') or ''
+    """统一决定当前告警展示哪张表，优先使用目标表名。"""
     src_tbl = row.get('src_tbl') or ''
-    dest_db = row.get('dest_db') or ''
     dest_tbl = row.get('dest_tbl') or ''
-
-    candidates = []
-    if dest_tbl:
-        candidates.append((get_table_layer_priority(dest_db), 1, dest_tbl))
-    if src_tbl:
-        candidates.append((get_table_layer_priority(src_db), 0, src_tbl))
-
-    if not candidates:
-        return ''
-
-    best_priority = max(priority for priority, _, _ in candidates)
-    if best_priority > 0:
-        prioritized = [item for item in candidates if item[0] == best_priority]
-        prioritized.sort(key=lambda item: item[1], reverse=True)
-        return prioritized[0][2]
-
     return dest_tbl or src_tbl
+
+def build_search_tables(row):
+    """构造查找修复任务时使用的候选表名，优先展示名，再回退另一侧表名。"""
+    search_tables = []
+    for table_name in (resolve_repair_table(row), row.get('src_tbl') or '', row.get('dest_tbl') or ''):
+        normalized = str(table_name).strip()
+        if normalized and normalized not in search_tables:
+            search_tables.append(normalized)
+    return search_tables
 
 
 def count_remaining_alert_tables():
@@ -787,6 +765,9 @@ def step1_scan_alerts(now=None):
                 alert = {
                     'id': row['id'],
                     'table': table_name,
+                    'src_tbl': row.get('src_tbl', ''),
+                    'dest_tbl': row.get('dest_tbl', ''),
+                    'search_tables': build_search_tables(row),
                     'dt': dt,
                     'name': row.get('name', ''),
                     'diff': row.get('diff', '')
@@ -913,11 +894,15 @@ def step2_find_locations(alerts):
     for alert in alerts:
         table = alert['table']
         log(f"🔍 {table}")
+        search_tables = alert.get('search_tables') or [table]
 
         if alert.get('status') == 'skipped_out_of_window':
             task = {
                 'alert_id': alert['id'],
                 'table': table,
+                'src_tbl': alert.get('src_tbl', ''),
+                'dest_tbl': alert.get('dest_tbl', ''),
+                'search_tables': search_tables,
                 'dt': alert['dt'],
                 'diff': alert.get('diff'),
                 'workflow_code': '',
@@ -936,14 +921,18 @@ def step2_find_locations(alerts):
         scheduled_location = None
         # 先在优先工作流中搜索
         for wf_code, wf_name in priority_workflows:
-            result = step2_search_in_workflow(wf_code, table)
-            if result:
+            for search_table in search_tables:
+                result = step2_search_in_workflow(wf_code, search_table)
+                if not result:
+                    continue
                 if schedule_map is None:
                     schedule_map = get_schedule_map()
                 if is_workflow_scheduled(result['workflow_code'], schedule_map):
                     scheduled_location = result
                     continue
                 location = result
+                break
+            if location:
                 break
         
         # 如果没找到，再搜索所有工作流（使用缓存）
@@ -968,8 +957,10 @@ def step2_find_locations(alerts):
                 )
                 # 跳过已在priority中搜索过的工作流
                 if wf_code not in [pw[0] for pw in priority_workflows]:
-                    result = step2_search_in_workflow(wf_code, table)
-                    if result:
+                    for search_table in search_tables:
+                        result = step2_search_in_workflow(wf_code, search_table)
+                        if not result:
+                            continue
                         if schedule_map is None:
                             schedule_map = get_schedule_map()
                         if is_workflow_scheduled(result['workflow_code'], schedule_map):
@@ -978,11 +969,16 @@ def step2_find_locations(alerts):
                             continue
                         location = result
                         break
+                    if location:
+                        break
         
         if location:
             task = {
                 'alert_id': alert['id'],
                 'table': table,
+                'src_tbl': alert.get('src_tbl', ''),
+                'dest_tbl': alert.get('dest_tbl', ''),
+                'search_tables': search_tables,
                 'dt': alert['dt'],
                 'diff': alert.get('diff'),
                 'workflow_code': location['workflow_code'],
@@ -998,6 +994,9 @@ def step2_find_locations(alerts):
             task = {
                 'alert_id': alert['id'],
                 'table': table,
+                'src_tbl': alert.get('src_tbl', ''),
+                'dest_tbl': alert.get('dest_tbl', ''),
+                'search_tables': search_tables,
                 'dt': alert['dt'],
                 'diff': alert.get('diff'),
                 'workflow_code': '',
@@ -1012,6 +1011,9 @@ def step2_find_locations(alerts):
             task = {
                 'alert_id': alert['id'],
                 'table': table,
+                'src_tbl': alert.get('src_tbl', ''),
+                'dest_tbl': alert.get('dest_tbl', ''),
+                'search_tables': search_tables,
                 'dt': alert['dt'],
                 'diff': alert.get('diff'),
                 'workflow_code': '',

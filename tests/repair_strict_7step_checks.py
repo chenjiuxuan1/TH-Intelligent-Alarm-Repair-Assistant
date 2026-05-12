@@ -1103,6 +1103,32 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(table_name, "dwd_target_example")
 
+    def test_resolve_repair_table_prefers_dest_table_even_when_dest_is_lower_layer(self):
+        module = load_module()
+        row = {
+            "src_db": "dwd",
+            "src_tbl": "dwd_fox_chatbot_dialog",
+            "dest_db": "dwb",
+            "dest_tbl": "dwb_a5_dialog",
+        }
+
+        table_name = module.resolve_repair_table(row)
+
+        self.assertEqual(table_name, "dwb_a5_dialog")
+
+    def test_resolve_repair_table_prefers_dest_table_for_cross_layer_dialog_alert(self):
+        module = load_module()
+        row = {
+            "src_db": "dwb",
+            "src_tbl": "dwb_a5_dialog",
+            "dest_db": "dwd_paimon",
+            "dest_tbl": "dwd_fox_chatbot_dialog",
+        }
+
+        table_name = module.resolve_repair_table(row)
+
+        self.assertEqual(table_name, "dwd_fox_chatbot_dialog")
+
     def test_resolve_alert_dt_prefers_begin_date(self):
         module = load_module()
         row = {
@@ -1847,7 +1873,7 @@ class RepairStrict7StepTests(unittest.TestCase):
     def test_step2_find_locations_accepts_workflow_definition_code_from_list_items(self):
         module = load_module()
         module.PRIORITY_WORKFLOWS = []
-        alerts = [{"id": 1, "table": "dwb_a5_dialog", "dt": "2026-05-11", "diff": 1}]
+        alerts = [{"id": 1, "table": "dwd_fox_chatbot_dialog", "dt": "2026-05-11", "diff": 1}]
         searched_codes = []
 
         def fake_search(workflow_code, table_name):
@@ -1857,7 +1883,7 @@ class RepairStrict7StepTests(unittest.TestCase):
                     "workflow_code": "wf-dialog",
                     "workflow_name": "印尼-数仓工作流（1/2H）",
                     "task_code": "task-dialog",
-                    "task_name": "dwb_a5_dialog",
+                    "task_name": "dwd_fox_chatbot_dialog",
                     "task_flag": "YES",
                 }
             return None
@@ -1875,7 +1901,54 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(searched_codes, ["wf-dialog"])
         self.assertEqual(tasks[0]["workflow_code"], "wf-dialog")
-        self.assertEqual(tasks[0]["task_name"], "dwb_a5_dialog")
+        self.assertEqual(tasks[0]["task_name"], "dwd_fox_chatbot_dialog")
+
+    def test_step2_find_locations_tries_display_table_name_first(self):
+        module = load_module()
+        module.PRIORITY_WORKFLOWS = []
+        alerts = [
+            {
+                "id": 1,
+                "table": "dwd_fox_chatbot_dialog",
+                "src_tbl": "dwb_a5_dialog",
+                "dest_tbl": "dwd_fox_chatbot_dialog",
+                "search_tables": ["dwd_fox_chatbot_dialog", "dwb_a5_dialog"],
+                "dt": "2026-05-11",
+                "diff": 1,
+            }
+        ]
+        searched = []
+
+        def fake_search(workflow_code, table_name):
+            searched.append((workflow_code, table_name))
+            if table_name == "dwd_fox_chatbot_dialog":
+                return {
+                    "workflow_code": "wf-dialog",
+                    "workflow_name": "印尼-数仓工作流（1H）",
+                    "task_code": "task-dialog",
+                    "task_name": "dwd_fox_chatbot_dialog",
+                    "task_flag": "YES",
+                }
+            return None
+
+        with mock.patch.object(module, "step2_search_in_workflow", side_effect=fake_search), \
+            mock.patch.object(
+                module,
+                "get_workflow_definition_list",
+                return_value=(True, {"totalList": [{"workflowDefinitionCode": "wf-dialog"}]}, ""),
+            ), \
+            mock.patch.object(module, "get_schedule_map", return_value={}), \
+            mock.patch.object(module, "is_workflow_scheduled", return_value=False), \
+            mock.patch.object(module, "log"):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(
+            searched,
+            [("wf-dialog", "dwd_fox_chatbot_dialog")],
+        )
+        self.assertEqual(tasks[0]["workflow_code"], "wf-dialog")
+        self.assertEqual(tasks[0]["table"], "dwd_fox_chatbot_dialog")
+        self.assertEqual(tasks[0]["task_name"], "dwd_fox_chatbot_dialog")
 
     def test_get_workflow_definition_list_falls_back_when_first_endpoint_returns_empty_success(self):
         module = load_module()
