@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -231,6 +232,31 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(started_codes, ["wf-daily", "wf-l1"])
 
+    def test_step5_execute_fuyan_falls_back_to_workflow_style_start_when_process_style_fails(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {"workflow_name": "每日复验全级别数据(W-1)", "workflow_code": "wf-daily", "level": "全级别"}
+        ]
+        attempts = []
+
+        def fake_ds_api_post(endpoint, data):
+            attempts.append((endpoint, dict(data)))
+            if endpoint.endswith("start-process-instance"):
+                return False, {}, "process style unsupported"
+            return True, {"data": [88888]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
+            mock.patch.object(module, "log"):
+            results = module.step5_execute_fuyan([{"table": "dwd_fox_mission_log"}], [], [{"table": "dwd_fox_mission_log"}])
+
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(attempts[0][0].endswith("start-process-instance"))
+        self.assertEqual(attempts[0][1]["processDefinitionCode"], "wf-daily")
+        self.assertTrue(attempts[1][0].endswith("start-workflow-instance"))
+        self.assertEqual(attempts[1][1]["workflowDefinitionCode"], "wf-daily")
+        self.assertEqual(results[0]["status"], "success")
+        self.assertEqual(results[0]["id"], 88888)
+
     def test_step2_search_in_workflow_falls_back_to_process_definition_for_ds32(self):
         module = load_module()
 
@@ -249,6 +275,28 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(result["workflow_name"], "DWD")
         self.assertEqual(result["task_code"], "task-1")
+
+    def test_step2_search_in_workflow_does_not_match_sql_only_reference_from_other_task(self):
+        module = load_module()
+        detail = {
+            "processDefinition": {"name": "DWD"},
+            "taskDefinitionList": [
+                {
+                    "code": "task-main",
+                    "name": "dwd_asset_main",
+                    "taskParams": json.dumps(
+                        {
+                            "sql": "insert overwrite table dwd_asset_main select * from dwb_asset_info"
+                        }
+                    ),
+                }
+            ],
+        }
+
+        with mock.patch.object(module, "get_workflow_definition_detail", return_value=(True, detail, "")):
+            result = module.step2_search_in_workflow("wf-asset", "dwb_asset_info")
+
+        self.assertIsNone(result)
 
     def test_step3_start_repair_uses_process_style_start_payload_by_default(self):
         module = load_module()

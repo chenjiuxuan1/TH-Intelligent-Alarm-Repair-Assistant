@@ -19,6 +19,7 @@ from config.config import DS_CONFIG, FUYAN_WORKFLOWS, REPAIR_CONFIG, TABLE_CONFI
 
 import json
 import os
+import re
 import urllib.request
 import time
 from datetime import datetime, timedelta
@@ -132,6 +133,99 @@ def should_retry_with_property_list_start_params(message):
     text = str(message or '')
     lowered = text.lower()
     return 'parse json' in lowered and 'property failed' in lowered
+
+
+def normalize_table_identifier(value):
+    text = str(value or '').strip().lower().strip('`')
+    return text.replace('`', '')
+
+
+def strip_table_prefix(value):
+    normalized = normalize_table_identifier(value)
+    for prefix in ('dwd_', 'dwb_', 'ods_'):
+        if normalized.startswith(prefix):
+            return normalized[len(prefix):]
+    return normalized
+
+
+def is_task_name_match(task_name, table_name):
+    task_name_normalized = normalize_table_identifier(task_name)
+    table_name_normalized = normalize_table_identifier(table_name)
+    stripped_table_name = strip_table_prefix(table_name)
+    return (
+        table_name_normalized == task_name_normalized
+        or stripped_table_name == task_name_normalized
+        or stripped_table_name in task_name_normalized
+    )
+
+
+def sql_targets_table(sql_text, table_name):
+    sql = str(sql_text or '').lower()
+    if not sql:
+        return False
+
+    expected = normalize_table_identifier(table_name)
+    expected_suffix = f".{expected}"
+    patterns = [
+        r"\binsert\s+overwrite\s+table\s+([`a-zA-Z0-9_.]+)",
+        r"\binsert\s+into\s+table\s+([`a-zA-Z0-9_.]+)",
+        r"\binsert\s+into\s+([`a-zA-Z0-9_.]+)",
+        r"\bcreate\s+table\s+(?:if\s+not\s+exists\s+)?([`a-zA-Z0-9_.]+)",
+    ]
+
+    for pattern in patterns:
+        for matched in re.findall(pattern, sql):
+            candidate = normalize_table_identifier(matched)
+            if candidate == expected or candidate.endswith(expected_suffix):
+                return True
+    return False
+
+
+def start_workflow_instance_with_fallbacks(project_code, workflow_code, base_data, dt=None, table=''):
+    start_attempts = _get_start_attempts()
+    start_params_payloads = build_start_params_payloads(dt) if dt else [None]
+    success = False
+    result = {}
+    msg = ''
+    used_endpoint = ''
+    used_payload = {}
+    launched_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    for start_endpoint, code_field in start_attempts:
+        for index, start_params_payload in enumerate(start_params_payloads):
+            attempt_data = dict(base_data)
+            if start_params_payload is not None:
+                attempt_data['startParams'] = start_params_payload
+            attempt_data[code_field] = workflow_code
+            attempt_data['scheduleTime'] = launched_at if start_endpoint == 'start-workflow-instance' else ''
+            used_endpoint = f"/projects/{project_code}/executors/{start_endpoint}"
+            used_payload = attempt_data
+            debug_log(
+                f"尝试启动 table={table or workflow_code} endpoint={used_endpoint} "
+                f"code_field={code_field} start_params_index={index}"
+            )
+            success, result, msg = ds_api_post(used_endpoint, attempt_data)
+            if success:
+                extracted_instance_id = _extract_instance_id_from_start_result(result)
+                if extracted_instance_id not in (None, ''):
+                    return True, result, msg, used_endpoint, used_payload, launched_at
+                debug_log(
+                    f"启动接口返回成功但无实例ID table={table or workflow_code} "
+                    f"endpoint={used_endpoint} raw_data={result.get('data')!r}"
+                )
+                success = False
+                result = {}
+                msg = '启动接口返回成功但未提供实例ID'
+            else:
+                debug_log(
+                    f"启动失败 table={table or workflow_code} endpoint={used_endpoint} "
+                    f"msg={msg or result.get('msg', '')}"
+                )
+                if start_params_payload is not None and index == 0 and should_retry_with_property_list_start_params(msg):
+                    continue
+            break
+
+    return success, result, msg, used_endpoint, used_payload, launched_at
 
 
 def _get_instance_state_types_for_search(include_all=False):
@@ -922,7 +1016,7 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None):
     if not success:
         return None
     
-    search_term = table_name.lower().replace('dwd_', '').replace('dwb_', '').replace('ods_', '')
+    search_term = strip_table_prefix(table_name)
     tasks = detail.get('taskDefinitionList', [])
     workflow_name = get_workflow_name_from_detail(detail)
     candidates = []
@@ -950,7 +1044,7 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None):
         # 匹配任务名
         task_params = normalize_task_params(task)
 
-        if search_term in task_name_lower:
+        if is_task_name_match(task_name, table_name):
             candidate = build_candidate(task, task_name)
             if is_subprocess_task(candidate.get('task_type')):
                 child_workflow_code = extract_subprocess_workflow_code(task, task_params)
@@ -963,8 +1057,8 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None):
             continue
         
         # 匹配SQL
-        sql = task_params.get('sql', '').lower()
-        if search_term in sql:
+        sql = task_params.get('sql', '')
+        if sql_targets_table(sql, table_name):
             candidates.append(build_candidate(task, task_name))
     
     if child_candidates:
@@ -1290,8 +1384,6 @@ def step3_start_repair(tasks):
             results.append(task)
             continue
         
-        # 启动修复
-        start_params_payloads = build_start_params_payloads(dt)
         base_data = {
             'startNodeList': task_code,
             'taskDependType': 'TASK_ONLY',
@@ -1303,45 +1395,13 @@ def step3_start_repair(tasks):
             'tenantCode': DS_TENANT_CODE,
             'dryRun': 0,
         }
-        launched_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        start_attempts = _get_start_attempts()
-        success = False
-        result = {}
-        msg = ''
-        used_endpoint = ''
-        used_payload = {}
-        for start_endpoint, code_field in start_attempts:
-            for index, start_params_payload in enumerate(start_params_payloads):
-                attempt_data = dict(base_data)
-                attempt_data['startParams'] = start_params_payload
-                attempt_data[code_field] = workflow_code
-                attempt_data['scheduleTime'] = launched_at if start_endpoint == 'start-workflow-instance' else ''
-                used_endpoint = f"/projects/{PROJECT_CODE}/executors/{start_endpoint}"
-                used_payload = attempt_data
-                debug_log(
-                    f"尝试启动 table={table} endpoint={used_endpoint} code_field={code_field} start_params_index={index}"
-                )
-                success, result, msg = ds_api_post(used_endpoint, attempt_data)
-                if success:
-                    extracted_instance_id = _extract_instance_id_from_start_result(result)
-                    if extracted_instance_id not in (None, ''):
-                        break
-                    debug_log(
-                        f"启动接口返回成功但无实例ID table={table} endpoint={used_endpoint} raw_data={result.get('data')!r}"
-                    )
-                    success = False
-                    result = {}
-                    msg = '启动接口返回成功但未提供实例ID'
-                else:
-                    debug_log(
-                        f"启动失败 table={table} endpoint={used_endpoint} msg={msg or result.get('msg', '')}"
-                    )
-                    if index == 0 and should_retry_with_property_list_start_params(msg):
-                        continue
-                break
-            if success:
-                break
+        success, result, msg, used_endpoint, used_payload, launched_at = start_workflow_instance_with_fallbacks(
+            PROJECT_CODE,
+            workflow_code,
+            base_data,
+            dt=dt,
+            table=table,
+        )
 
         if success:
             instance_id = _extract_instance_id_from_start_result(result)
@@ -1654,15 +1714,18 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
             'taskDependType': 'TASK_POST',
             'runMode': 'RUN_MODE_SERIAL',
             'dryRun': 0,
-            'scheduleTime': ''
         }
-        
-        success, result, msg = ds_api_post(f"/projects/{fuyan_project_code}/executors/start-process-instance", data)
+
+        success, result, msg, _, _, launched_at = start_workflow_instance_with_fallbacks(
+            fuyan_project_code,
+            fuyan_code,
+            data,
+            table=fuyan_name,
+        )
         if success:
             instance_id = result.get('data')
             if isinstance(instance_id, list) and len(instance_id) > 0:
                 instance_id = instance_id[0]
-            launched_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             log(f"    ✅ 启动成功: {instance_id}")
             fuyan_results.append({
                 'name': fuyan_name,
@@ -1675,7 +1738,7 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
                 'launched_at': launched_at,
             })
         else:
-            error_msg = result.get('msg', '未知错误')
+            error_msg = result.get('msg') or msg or '未知错误'
             log(f"    ❌ 启动失败: {error_msg}")
             fuyan_results.append({'name': fuyan_name, 'status': 'failed', 'error': error_msg})
     
