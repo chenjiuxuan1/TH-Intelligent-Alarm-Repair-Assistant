@@ -847,7 +847,13 @@ class RepairStrict7StepTests(unittest.TestCase):
             if endpoint.endswith("/workflow-definition/158514956979200"):
                 return True, {
                     "processDefinition": {"name": "印尼-数仓工作流（1/2H）"},
-                    "taskDefinitionList": [{"code": "task-parent", "name": "ods_cash_model_model"}],
+                    "taskDefinitionList": [
+                        {
+                            "code": "task-parent",
+                            "name": "ods_cash_model_model",
+                            "taskType": "SUB_PROCESS",
+                        }
+                    ],
                 }, ""
             if endpoint.endswith("/workflow-definition/child-free"):
                 return True, {
@@ -887,7 +893,13 @@ class RepairStrict7StepTests(unittest.TestCase):
             if endpoint.endswith("/workflow-definition/158514956979200"):
                 return True, {
                     "processDefinition": {"name": "印尼-数仓工作流（1/2H）"},
-                    "taskDefinitionList": [{"code": "task-parent", "name": "ods_cash_model_model"}],
+                    "taskDefinitionList": [
+                        {
+                            "code": "task-parent",
+                            "name": "ods_cash_model_model",
+                            "taskType": "SUB_PROCESS",
+                        }
+                    ],
                 }, ""
             if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
                 return True, {"totalList": [], "totalPage": 1}, ""
@@ -959,6 +971,48 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["workflow_code"], "wf-dialog-child")
         self.assertEqual(tasks[0]["workflow_name"], "DWD_FOX_CHATBOT_DIALOG")
         self.assertEqual(tasks[0]["task_code"], "task-child")
+        self.assertEqual(tasks[0]["task_name"], "dwd_fox_chatbot_dialog")
+
+    def test_step2_find_locations_allows_scheduled_workflow_when_matching_real_task(self):
+        module = load_module()
+        module.PRIORITY_WORKFLOWS = []
+        alerts = [{"id": 1, "table": "dwd_fox_chatbot_dialog", "dt": "2026-05-11", "diff": 1}]
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return True, {
+                    "totalList": [{"workflowDefinitionCode": "wf-dwd-paimon"}],
+                    "totalPage": 1,
+                }, ""
+            if endpoint.endswith("/workflow-definition/wf-dwd-paimon"):
+                return True, {
+                    "processDefinition": {"name": "DWD_PAIMON"},
+                    "taskDefinitionList": [
+                        {
+                            "code": "task-real",
+                            "name": "dwd_fox_chatbot_dialog",
+                            "taskType": "SHELL",
+                        }
+                    ],
+                }, ""
+            if endpoint.endswith("/schedules?pageNo=1&pageSize=200"):
+                return True, {
+                    "totalList": [
+                        {
+                            "processDefinitionCode": "wf-dwd-paimon",
+                            "releaseState": "ONLINE",
+                        }
+                    ],
+                    "totalPage": 1,
+                }, ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "wf-dwd-paimon")
+        self.assertEqual(tasks[0]["workflow_name"], "DWD_PAIMON")
+        self.assertEqual(tasks[0]["task_code"], "task-real")
         self.assertEqual(tasks[0]["task_name"], "dwd_fox_chatbot_dialog")
 
     def test_step2_find_locations_keeps_out_of_window_status_and_skips_search(self):

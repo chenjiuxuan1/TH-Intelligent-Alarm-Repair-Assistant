@@ -889,6 +889,13 @@ def is_subprocess_task(task_type):
     return normalized in {'SUB_PROCESS', 'SUB_PROCESS_NODE', 'SUBPROCESS'}
 
 
+def should_block_scheduled_workflow_match(location):
+    """仅当命中的是父工作流里的子流程节点时，才禁止直接启动。"""
+    if not location:
+        return False
+    return is_subprocess_task(location.get('task_type'))
+
+
 def step2_search_in_workflow(workflow_code, table_name, visited=None):
     """在指定工作流中搜索表"""
     workflow_code = str(workflow_code)
@@ -1020,7 +1027,10 @@ def step2_find_locations(alerts):
                     continue
                 if schedule_map is None:
                     schedule_map = get_schedule_map()
-                if is_workflow_scheduled(result['workflow_code'], schedule_map):
+                if (
+                    is_workflow_scheduled(result['workflow_code'], schedule_map)
+                    and should_block_scheduled_workflow_match(result)
+                ):
                     scheduled_location = result
                     continue
                 location = result
@@ -1056,7 +1066,10 @@ def step2_find_locations(alerts):
                             continue
                         if schedule_map is None:
                             schedule_map = get_schedule_map()
-                        if is_workflow_scheduled(result['workflow_code'], schedule_map):
+                        if (
+                            is_workflow_scheduled(result['workflow_code'], schedule_map)
+                            and should_block_scheduled_workflow_match(result)
+                        ):
                             if scheduled_location is None:
                                 scheduled_location = result
                             continue
