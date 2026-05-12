@@ -112,6 +112,14 @@ def _get_start_attempts():
     ]
 
 
+def _extract_instance_id_from_start_result(result):
+    """从启动接口返回中提取实例ID；如果返回为空/无效，视为未真正启动成功。"""
+    instance_data = result.get('data')
+    if isinstance(instance_data, list):
+        return instance_data[0] if instance_data else None
+    return instance_data
+
+
 def _get_instance_state_types_for_search(include_all=False):
     """根据接口风格选择可查询的状态枚举，避开已知不兼容口径。"""
     if DS_INSTANCE_ENDPOINT_STYLE == 'process-instances' or DS_API_MODE == 'process_v2':
@@ -952,7 +960,12 @@ def step2_find_locations(alerts):
             
             # 在缓存的工作流中搜索
             for wf in all_workflows:
-                wf_code = wf.get('code')
+                wf_code = (
+                    wf.get('code')
+                    or wf.get('workflowDefinitionCode')
+                    or wf.get('processDefinitionCode')
+                    or wf.get('definitionCode')
+                )
                 # 跳过已在priority中搜索过的工作流
                 if wf_code not in [pw[0] for pw in priority_workflows]:
                     result = step2_search_in_workflow(wf_code, table)
@@ -1128,6 +1141,13 @@ def step3_start_repair(tasks):
         dt = task['dt']
         workflow_code = task.get('workflow_code')
         task_code = task.get('task_code')
+
+        if task.get('status') == 'skipped_out_of_window':
+            log(f"[{i}/{len(tasks)}] ⏭️ {table} - 超出自动修复窗口，转人工处理")
+            task['status'] = 'skipped_manual_review'
+            task['error'] = task.get('error') or '告警超出自动修复窗口，需人工处理'
+            results.append(task)
+            continue
         
         if not workflow_code or not task_code:
             log(f"[{i}/{len(tasks)}] ⏭️ {table} - 未找到工作流")
@@ -1180,21 +1200,24 @@ def step3_start_repair(tasks):
             )
             success, result, msg = ds_api_post(used_endpoint, attempt_data)
             if success:
-                break
+                extracted_instance_id = _extract_instance_id_from_start_result(result)
+                if extracted_instance_id not in (None, ''):
+                    break
+                debug_log(
+                    f"启动接口返回成功但无实例ID table={table} endpoint={used_endpoint} raw_data={result.get('data')!r}"
+                )
+                success = False
+                result = {}
+                msg = '启动接口返回成功但未提供实例ID'
             debug_log(
                 f"启动失败 table={table} endpoint={used_endpoint} msg={msg or result.get('msg', '')}"
             )
 
         if success:
-            instance_data = result.get('data')
-            # DS 3.3.0 返回的是数组格式 [id]，需要取第一个元素
-            if isinstance(instance_data, list) and len(instance_data) > 0:
-                instance_id = instance_data[0]
-            else:
-                instance_id = instance_data
+            instance_id = _extract_instance_id_from_start_result(result)
             debug_log(
                 f"启动成功 table={table} endpoint={used_endpoint} payload_keys={sorted(used_payload.keys())} "
-                f"raw_data={instance_data}"
+                f"raw_data={result.get('data')}"
             )
             log(f"  ✅ 启动成功，实例ID: {instance_id}")
             task['status'] = 'success'
@@ -1662,6 +1685,14 @@ def summarize_repair_outcome(alerts, completed_tasks, failed_tasks, manual_revie
             if table in failed_by_table:
                 rerun_task.update(failed_by_table[table])
             rerun_tasks.append(rerun_task)
+
+        if table in failed_by_table:
+            remaining_task = dict(alert)
+            remaining_task.update(failed_by_table[table])
+            remaining_task['result'] = 'manual_review'
+            remaining_task.setdefault('error', '自动重跑失败，需人工处理')
+            remaining_tasks.append(remaining_task)
+            continue
 
         if table in manual_by_table:
             remaining_task = dict(alert)

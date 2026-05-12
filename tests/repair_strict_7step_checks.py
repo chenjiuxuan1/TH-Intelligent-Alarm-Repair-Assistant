@@ -934,6 +934,32 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["error"], alerts[0]["error"])
         self.assertEqual(tasks[0]["table"], "dwd_user_coupon")
 
+    def test_step3_start_repair_skips_out_of_window_tasks_even_if_workflow_exists(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "dwd_user_coupon",
+                "dt": "2026-02-08",
+                "workflow_code": "wf-1",
+                "workflow_name": "DWD",
+                "task_code": "task-1",
+                "task_name": "dwd_user_coupon",
+                "status": "skipped_out_of_window",
+                "error": "告警窗口过长，转人工处理",
+            }
+        ]
+
+        with mock.patch.object(module, "ds_api_post") as mocked_post, \
+            mock.patch.object(module, "find_conflicting_running_instance") as mocked_conflict, \
+            mock.patch.object(module, "log"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        mocked_post.assert_not_called()
+        mocked_conflict.assert_not_called()
+        self.assertEqual(running_instances, [])
+        self.assertEqual(results[0]["status"], "skipped_manual_review")
+        self.assertIn("人工处理", results[0]["error"])
+
     def test_step2_search_in_workflow_marks_forbidden_task_for_manual_review(self):
         module = load_module()
 
@@ -1493,6 +1519,33 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(summary["remaining_tasks"][0]["table"], "dwd_user_coupon")
         self.assertIn("人工处理", summary["remaining_tasks"][0]["error"])
 
+    def test_summarize_repair_outcome_does_not_mark_failed_rerun_as_resolved(self):
+        module = load_module()
+        alerts = [{"table": "dwd_mkt_sms_cost_monthly", "dt": "2026-05-02", "diff": -52}]
+        completed_tasks = []
+        failed_tasks = [
+            {
+                "table": "dwd_mkt_sms_cost_monthly",
+                "dt": "2026-05-02",
+                "status": "failed",
+                "error": "查询失败: workflow instance 911,838 does not exist",
+            }
+        ]
+
+        summary = module.summarize_repair_outcome(
+            alerts=alerts,
+            completed_tasks=completed_tasks,
+            failed_tasks=failed_tasks,
+            manual_review_tasks=[],
+            remaining_tables=set(),
+        )
+
+        self.assertEqual(summary["resolved_count"], 0)
+        self.assertEqual(summary["remaining_count"], 1)
+        self.assertEqual(summary["remaining_tasks"][0]["table"], "dwd_mkt_sms_cost_monthly")
+        self.assertEqual(summary["remaining_tasks"][0]["result"], "manual_review")
+        self.assertIn("查询失败", summary["remaining_tasks"][0]["error"])
+
     def test_summarize_repair_outcome_counts_manual_review_tasks_in_display_pending_tables(self):
         module = load_module()
         alerts = [{"table": "dwd_user_coupon", "dt": "2026-02-08"}]
@@ -1790,6 +1843,91 @@ class RepairStrict7StepTests(unittest.TestCase):
             module.step2_find_locations(alerts)
 
         self.assertEqual(searched_codes, ["wf-priority"])
+
+    def test_step2_find_locations_accepts_workflow_definition_code_from_list_items(self):
+        module = load_module()
+        module.PRIORITY_WORKFLOWS = []
+        alerts = [{"id": 1, "table": "dwb_a5_dialog", "dt": "2026-05-11", "diff": 1}]
+        searched_codes = []
+
+        def fake_search(workflow_code, table_name):
+            searched_codes.append(workflow_code)
+            if workflow_code == "wf-dialog":
+                return {
+                    "workflow_code": "wf-dialog",
+                    "workflow_name": "印尼-数仓工作流（1/2H）",
+                    "task_code": "task-dialog",
+                    "task_name": "dwb_a5_dialog",
+                    "task_flag": "YES",
+                }
+            return None
+
+        with mock.patch.object(module, "step2_search_in_workflow", side_effect=fake_search), \
+            mock.patch.object(
+                module,
+                "get_workflow_definition_list",
+                return_value=(True, {"totalList": [{"workflowDefinitionCode": "wf-dialog"}]}, ""),
+            ), \
+            mock.patch.object(module, "get_schedule_map", return_value={}), \
+            mock.patch.object(module, "is_workflow_scheduled", return_value=False), \
+            mock.patch.object(module, "log"):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(searched_codes, ["wf-dialog"])
+        self.assertEqual(tasks[0]["workflow_code"], "wf-dialog")
+        self.assertEqual(tasks[0]["task_name"], "dwb_a5_dialog")
+
+    def test_get_workflow_definition_list_falls_back_when_first_endpoint_returns_empty_success(self):
+        module = load_module()
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return True, {"totalList": [], "totalPage": 1}, ""
+            if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return True, {"totalList": [{"code": "wf-1"}], "totalPage": 1}, ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_workflow_definition_list()
+
+        self.assertTrue(success)
+        self.assertEqual(data["totalList"], [{"code": "wf-1"}])
+
+    def test_step3_start_repair_falls_back_when_process_style_returns_empty_success_data(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "dwb_a5_dialog",
+                "dt": "2026-05-11",
+                "workflow_code": "wf-1",
+                "workflow_name": "印尼-数仓工作流（1H）",
+                "task_code": "task-1",
+                "task_name": "dwb_a5_dialog",
+                "task_flag": "YES",
+            }
+        ]
+        attempts = []
+
+        def fake_ds_api_post(endpoint, data):
+            attempts.append((endpoint, dict(data)))
+            if endpoint.endswith("start-process-instance"):
+                return True, {"data": None}, ""
+            if endpoint.endswith("start-workflow-instance"):
+                return True, {"data": [98765]}, ""
+            raise AssertionError(endpoint)
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
+            mock.patch.object(module, "find_conflicting_running_instance", return_value=None), \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(attempts[0][0].endswith("start-process-instance"))
+        self.assertTrue(attempts[1][0].endswith("start-workflow-instance"))
+        self.assertEqual(results[0]["status"], "success")
+        self.assertEqual(results[0]["instance_id"], 98765)
+        self.assertEqual(running_instances[0]["instance_id"], 98765)
 
 
 if __name__ == "__main__":
