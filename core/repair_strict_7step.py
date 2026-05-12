@@ -120,6 +120,20 @@ def _extract_instance_id_from_start_result(result):
     return instance_data
 
 
+def build_start_params_payloads(dt):
+    """兼容不同 DS 集群对 startParams 的 JSON 结构要求。"""
+    return [
+        json.dumps({'global': [{'prop': 'dt', 'value': dt}]}),
+        json.dumps([{'prop': 'dt', 'value': dt}]),
+    ]
+
+
+def should_retry_with_property_list_start_params(message):
+    text = str(message or '')
+    lowered = text.lower()
+    return 'parse json' in lowered and 'property failed' in lowered
+
+
 def _get_instance_state_types_for_search(include_all=False):
     """根据接口风格选择可查询的状态枚举，避开已知不兼容口径。"""
     if DS_INSTANCE_ENDPOINT_STYLE == 'process-instances' or DS_API_MODE == 'process_v2':
@@ -1277,6 +1291,7 @@ def step3_start_repair(tasks):
             continue
         
         # 启动修复
+        start_params_payloads = build_start_params_payloads(dt)
         base_data = {
             'startNodeList': task_code,
             'taskDependType': 'TASK_ONLY',
@@ -1284,7 +1299,6 @@ def step3_start_repair(tasks):
             'warningType': 'NONE',
             'warningGroupId': 0,
             'execType': 'START_PROCESS',
-            'startParams': json.dumps({'global': [{'prop': 'dt', 'value': dt}]}),
             'environmentCode': DS_ENVIRONMENT_CODE,
             'tenantCode': DS_TENANT_CODE,
             'dryRun': 0,
@@ -1298,28 +1312,36 @@ def step3_start_repair(tasks):
         used_endpoint = ''
         used_payload = {}
         for start_endpoint, code_field in start_attempts:
-            attempt_data = dict(base_data)
-            attempt_data[code_field] = workflow_code
-            attempt_data['scheduleTime'] = launched_at if start_endpoint == 'start-workflow-instance' else ''
-            used_endpoint = f"/projects/{PROJECT_CODE}/executors/{start_endpoint}"
-            used_payload = attempt_data
-            debug_log(
-                f"尝试启动 table={table} endpoint={used_endpoint} code_field={code_field}"
-            )
-            success, result, msg = ds_api_post(used_endpoint, attempt_data)
-            if success:
-                extracted_instance_id = _extract_instance_id_from_start_result(result)
-                if extracted_instance_id not in (None, ''):
-                    break
+            for index, start_params_payload in enumerate(start_params_payloads):
+                attempt_data = dict(base_data)
+                attempt_data['startParams'] = start_params_payload
+                attempt_data[code_field] = workflow_code
+                attempt_data['scheduleTime'] = launched_at if start_endpoint == 'start-workflow-instance' else ''
+                used_endpoint = f"/projects/{PROJECT_CODE}/executors/{start_endpoint}"
+                used_payload = attempt_data
                 debug_log(
-                    f"启动接口返回成功但无实例ID table={table} endpoint={used_endpoint} raw_data={result.get('data')!r}"
+                    f"尝试启动 table={table} endpoint={used_endpoint} code_field={code_field} start_params_index={index}"
                 )
-                success = False
-                result = {}
-                msg = '启动接口返回成功但未提供实例ID'
-            debug_log(
-                f"启动失败 table={table} endpoint={used_endpoint} msg={msg or result.get('msg', '')}"
-            )
+                success, result, msg = ds_api_post(used_endpoint, attempt_data)
+                if success:
+                    extracted_instance_id = _extract_instance_id_from_start_result(result)
+                    if extracted_instance_id not in (None, ''):
+                        break
+                    debug_log(
+                        f"启动接口返回成功但无实例ID table={table} endpoint={used_endpoint} raw_data={result.get('data')!r}"
+                    )
+                    success = False
+                    result = {}
+                    msg = '启动接口返回成功但未提供实例ID'
+                else:
+                    debug_log(
+                        f"启动失败 table={table} endpoint={used_endpoint} msg={msg or result.get('msg', '')}"
+                    )
+                    if index == 0 and should_retry_with_property_list_start_params(msg):
+                        continue
+                break
+            if success:
+                break
 
         if success:
             instance_id = _extract_instance_id_from_start_result(result)

@@ -320,6 +320,44 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["instance_id"], 67890)
         self.assertEqual(running_instances[0]["instance_id"], 67890)
 
+    def test_step3_start_repair_falls_back_to_property_list_start_params_when_global_wrapper_is_rejected(self):
+        module = load_module()
+        tasks = [
+            {
+                "table": "dwb_asset_info",
+                "dt": "2026-05-11",
+                "workflow_code": "wf-1",
+                "workflow_name": "DWD",
+                "task_code": "task-1",
+                "task_name": "dwd_asset_main",
+            }
+        ]
+        attempts = []
+
+        def fake_ds_api_post(endpoint, data):
+            attempts.append((endpoint, dict(data)))
+            if len(attempts) == 1:
+                return False, {}, 'start workflow instance error:Parse json: {"global": [{"prop": "dt", "value": "2026-05-11"}]} to list of class: org.apache.dolphinscheduler.plugin.task.api.model.Property failed'
+            return True, {"data": [13579]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
+            mock.patch.object(module, "find_conflicting_running_instance", return_value=None), \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(
+            attempts[0][1]["startParams"],
+            '{"global": [{"prop": "dt", "value": "2026-05-11"}]}',
+        )
+        self.assertEqual(
+            attempts[1][1]["startParams"],
+            '[{"prop": "dt", "value": "2026-05-11"}]',
+        )
+        self.assertEqual(results[0]["instance_id"], 13579)
+        self.assertEqual(running_instances[0]["instance_id"], 13579)
+
     def test_step3_start_repair_uses_configured_workflow_style_start_mode(self):
         module = load_module()
         module.DS_START_ENDPOINT = "start-workflow-instance"
