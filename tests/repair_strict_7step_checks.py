@@ -910,6 +910,57 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertIn("带定时", tasks[0]["error"])
         self.assertIn("1/2H", tasks[0]["error"])
 
+    def test_step2_find_locations_descends_into_subprocess_child_workflow(self):
+        module = load_module()
+        module.PRIORITY_WORKFLOWS = [('158514956979200', '印尼-数仓工作流（1/2H）')]
+        alerts = [{"id": 1, "table": "dwd_fox_chatbot_dialog", "dt": "2026-05-11", "diff": 1}]
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition/158514956979200"):
+                return True, {
+                    "processDefinition": {"name": "印尼-数仓工作流（1/2H）"},
+                    "taskDefinitionList": [
+                        {
+                            "code": "task-parent-subprocess",
+                            "name": "dwd_fox_chatbot_dialog",
+                            "taskType": "SUB_PROCESS",
+                            "taskParams": {"processDefinitionCode": "wf-dialog-child"},
+                        }
+                    ],
+                }, ""
+            if endpoint.endswith("/workflow-definition/wf-dialog-child"):
+                return True, {
+                    "processDefinition": {"name": "DWD_FOX_CHATBOT_DIALOG"},
+                    "taskDefinitionList": [
+                        {
+                            "code": "task-child",
+                            "name": "dwd_fox_chatbot_dialog",
+                            "taskType": "SHELL",
+                        }
+                    ],
+                }, ""
+            if endpoint.endswith("/schedules?pageNo=1&pageSize=200"):
+                return True, {
+                    "totalList": [
+                        {
+                            "processDefinitionCode": "158514956979200",
+                            "releaseState": "ONLINE",
+                        }
+                    ],
+                    "totalPage": 1,
+                }, ""
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return True, {"totalList": [], "totalPage": 1}, ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "wf-dialog-child")
+        self.assertEqual(tasks[0]["workflow_name"], "DWD_FOX_CHATBOT_DIALOG")
+        self.assertEqual(tasks[0]["task_code"], "task-child")
+        self.assertEqual(tasks[0]["task_name"], "dwd_fox_chatbot_dialog")
+
     def test_step2_find_locations_keeps_out_of_window_status_and_skips_search(self):
         module = load_module()
         alerts = [

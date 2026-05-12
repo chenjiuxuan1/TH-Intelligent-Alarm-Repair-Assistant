@@ -145,6 +145,26 @@ def get_workflow_definition_detail(workflow_code):
     return False, {}, last_msg
 
 
+def get_workflow_name_from_detail(detail):
+    """兼容不同 DS 版本返回结构，尽量提取工作流名称。"""
+    if not isinstance(detail, dict):
+        return ''
+
+    candidates = [
+        detail.get('processDefinition', {}).get('name', ''),
+        detail.get('workflowDefinition', {}).get('name', ''),
+        detail.get('processDefinitionName', ''),
+        detail.get('workflowDefinitionName', ''),
+        detail.get('name', ''),
+        detail.get('workflowName', ''),
+    ]
+    for name in candidates:
+        normalized = str(name).strip()
+        if normalized:
+            return normalized
+    return ''
+
+
 def get_workflow_definition_list():
     """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 列表接口，并自动翻页"""
     endpoint_templates = _get_definition_list_endpoint_templates()
@@ -816,20 +836,81 @@ def step1_scan_alerts(now=None):
     return unique_alerts
 
 
-def step2_search_in_workflow(workflow_code, table_name):
+def normalize_task_params(task):
+    """将 taskParams 统一解析为 dict。"""
+    task_params = task.get('taskParams', '{}')
+    if isinstance(task_params, str):
+        try:
+            task_params = json.loads(task_params)
+        except Exception:
+            task_params = {}
+    return task_params if isinstance(task_params, dict) else {}
+
+
+def extract_subprocess_workflow_code(task, task_params=None):
+    """从子流程节点及其参数里尽量提取子工作流 code。"""
+    if task_params is None:
+        task_params = normalize_task_params(task)
+
+    def find_code(value):
+        if isinstance(value, dict):
+            for key in (
+                'processDefinitionCode',
+                'workflowDefinitionCode',
+                'definitionCode',
+                'processCode',
+                'workflowCode',
+                'subProcessCode',
+                'subWorkflowCode',
+            ):
+                candidate = value.get(key)
+                if candidate not in (None, ''):
+                    return str(candidate)
+            for nested_value in value.values():
+                candidate = find_code(nested_value)
+                if candidate:
+                    return candidate
+            return ''
+        if isinstance(value, list):
+            for item in value:
+                candidate = find_code(item)
+                if candidate:
+                    return candidate
+        return ''
+
+    direct_code = find_code(task)
+    if direct_code:
+        return direct_code
+    return find_code(task_params)
+
+
+def is_subprocess_task(task_type):
+    normalized = str(task_type or '').strip().upper()
+    return normalized in {'SUB_PROCESS', 'SUB_PROCESS_NODE', 'SUBPROCESS'}
+
+
+def step2_search_in_workflow(workflow_code, table_name, visited=None):
     """在指定工作流中搜索表"""
+    workflow_code = str(workflow_code)
+    visited = set(visited or set())
+    if workflow_code in visited:
+        return None
+    visited.add(workflow_code)
+
     success, detail, msg = get_workflow_definition_detail(workflow_code)
     if not success:
         return None
     
     search_term = table_name.lower().replace('dwd_', '').replace('dwb_', '').replace('ods_', '')
     tasks = detail.get('taskDefinitionList', [])
+    workflow_name = get_workflow_name_from_detail(detail)
     candidates = []
+    child_candidates = []
 
     def build_candidate(task, task_name):
         return {
             'workflow_code': workflow_code,
-            'workflow_name': detail.get('processDefinition', {}).get('name', ''),
+            'workflow_name': workflow_name,
             'task_code': task.get('code'),
             'task_name': task_name,
             'task_flag': task.get('flag', 'YES'),
@@ -846,22 +927,34 @@ def step2_search_in_workflow(workflow_code, table_name):
             continue
         
         # 匹配任务名
+        task_params = normalize_task_params(task)
+
         if search_term in task_name_lower:
-            candidates.append(build_candidate(task, task_name))
+            candidate = build_candidate(task, task_name)
+            if is_subprocess_task(candidate.get('task_type')):
+                child_workflow_code = extract_subprocess_workflow_code(task, task_params)
+                if child_workflow_code and child_workflow_code != workflow_code:
+                    child_result = step2_search_in_workflow(child_workflow_code, table_name, visited=visited)
+                    if child_result:
+                        child_candidates.append(child_result)
+                        continue
+            candidates.append(candidate)
             continue
         
         # 匹配SQL
-        task_params = task.get('taskParams', '{}')
-        if isinstance(task_params, str):
-            try:
-                task_params = json.loads(task_params)
-            except:
-                task_params = {}
-        
         sql = task_params.get('sql', '').lower()
         if search_term in sql:
             candidates.append(build_candidate(task, task_name))
     
+    if child_candidates:
+        non_datax_child_candidates = [
+            candidate for candidate in child_candidates
+            if candidate.get('task_type') != 'DATAX'
+        ]
+        if non_datax_child_candidates:
+            return non_datax_child_candidates[0]
+        return child_candidates[0]
+
     if not candidates:
         return None
 
