@@ -38,8 +38,10 @@ def load_module():
         "quality_alert_table": "default_quality_alert",
     }
     fake_config_config.REPAIR_CONFIG = {
-        "scan_lookback_days": 7,
+        "scan_lookback_days": 8,
         "priority_workflow_codes": [],
+        "blocked_workflow_names": ["印尼-宽表全量工作流（1D）"],
+        "blocked_fuyan_workflow_names": [],
     }
     fake_config_config.FUYAN_WORKFLOWS = [
         {"name": "默认复验", "code": "wf-default", "level": "all"},
@@ -74,7 +76,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(module.FUYAN_PROJECT_CODE, "default-fuyan-project")
         self.assertEqual(module.DS_TOKEN, "default-token")
         self.assertEqual(module.MANUAL_REVIEW_STATE_FILE, "/tmp/default-workspace/auto_repair_records/manual_review_state.json")
-        self.assertEqual(module.SCAN_LOOKBACK_DAYS, 7)
+        self.assertEqual(module.SCAN_LOOKBACK_DAYS, 8)
         self.assertEqual(module.FUYAN_WORKFLOWS, [{"name": "默认复验", "code": "wf-default", "level": "all"}])
 
     def test_step1_scan_alerts_marks_out_of_window_alert_as_manual_review(self):
@@ -107,10 +109,10 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0]["table"], "dwd_old_table")
         self.assertEqual(alerts[0]["status"], "skipped_out_of_window")
-        self.assertIn("begin", alerts[0]["error"])
-        self.assertIn("2026-05-03", alerts[0]["error"])
+        self.assertIn("最新告警日期", alerts[0]["error"])
+        self.assertIn("2026-05-02", alerts[0]["error"])
 
-    def test_step1_scan_alerts_skips_alert_when_begin_end_window_exceeds_lookback(self):
+    def test_step1_scan_alerts_keeps_alert_when_latest_alert_dt_is_within_lookback(self):
         module = load_module()
         rows = [
             {
@@ -139,8 +141,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0]["table"], "dwd_long_window_table")
-        self.assertEqual(alerts[0]["status"], "skipped_out_of_window")
-        self.assertIn("begin", alerts[0]["error"])
+        self.assertNotIn("status", alerts[0])
 
     def test_step5_execute_fuyan_accepts_workflow_name_style_config(self):
         module = load_module()
@@ -212,9 +213,35 @@ class RepairStrict7StepTests(unittest.TestCase):
         with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
             module.step5_execute_fuyan([{"table": "dwd_fox_mission_log"}], [], [{"table": "dwd_fox_mission_log"}])
 
-        self.assertEqual(started_codes, ["wf-daily", "wf-l3"])
+        self.assertEqual(started_codes, ["wf-daily", "wf-l1", "wf-l3"])
 
-    def test_step5_execute_fuyan_selects_daily_and_level1_for_dwb_tables(self):
+    def test_step5_execute_fuyan_always_includes_level1_for_non_dwb_tables(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {"workflow_name": "每日复验全级别数据(W-1)", "workflow_code": "wf-daily", "level": "全级别"},
+            {"workflow_name": "每小时复验1级表数据(D-1)", "workflow_code": "wf-l1", "level": "1级表"},
+            {"workflow_name": "两小时复验3级表数据(D-1)", "workflow_code": "wf-l3", "level": "3级表"},
+        ]
+
+        started_nodes = {}
+
+        def fake_ds_api_post(endpoint, data):
+            started_nodes[data["processDefinitionCode"]] = dict(data)
+            return True, {"data": [len(started_nodes)]}, ""
+
+        with mock.patch.object(
+            module,
+            "get_workflow_definition_detail",
+            side_effect=[
+                (True, {"taskDefinitionList": [{"code": "task-l1", "name": "复验1级表"}]}, ""),
+            ],
+        ), mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
+            module.step5_execute_fuyan([{"table": "dwd_fox_mission_log"}], [], [{"table": "dwd_fox_mission_log"}])
+
+        self.assertEqual(started_nodes["wf-l1"]["startNodeList"], "task-l1")
+        self.assertEqual(started_nodes["wf-l1"]["taskDependType"], "TASK_ONLY")
+
+    def test_step5_execute_fuyan_selects_only_level1_for_dwb_tables(self):
         module = load_module()
         module.FUYAN_WORKFLOWS = [
             {"workflow_name": "每日复验全级别数据(W-1)", "workflow_code": "wf-daily", "level": "全级别"},
@@ -228,9 +255,47 @@ class RepairStrict7StepTests(unittest.TestCase):
             return True, {"data": [len(started_codes)]}, ""
 
         with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
-            module.step5_execute_fuyan([{"table": "dwb_cash_audit"}], [], [{"table": "dwb_cash_audit"}])
+            results = module.step5_execute_fuyan([{"table": "dwb_cash_audit"}], [], [{"table": "dwb_cash_audit"}])
 
-        self.assertEqual(started_codes, ["wf-daily", "wf-l1"])
+        self.assertEqual(started_codes, ["wf-l1"])
+        self.assertEqual([item["name"] for item in results], ["每小时复验1级表数据(D-1)"])
+
+    def test_step5_execute_fuyan_resolves_level1_node_from_workflow_specific_project_code(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {
+                "project_code": "project-fuyan-a",
+                "workflow_name": "每小时复验1级表数据(D-1)",
+                "workflow_code": "wf-l1",
+                "level": "1级表",
+            },
+        ]
+
+        captured = {}
+
+        def fake_ds_api_post(endpoint, data):
+            captured["endpoint"] = endpoint
+            captured["data"] = dict(data)
+            return True, {"data": [12345]}, ""
+
+        with mock.patch.object(
+            module,
+            "get_workflow_definition_detail",
+            return_value=(
+                True,
+                {"taskDefinitionList": [{"code": "task-l1", "name": "复验1级表"}]},
+                "",
+            ),
+        ) as detail_mock, \
+            mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
+            results = module.step5_execute_fuyan([{"table": "dwb_cash_audit"}], [], [{"table": "dwb_cash_audit"}])
+
+        detail_mock.assert_called_once_with("wf-l1", "project-fuyan-a")
+        self.assertEqual(captured["endpoint"], "/projects/project-fuyan-a/executors/start-process-instance")
+        self.assertEqual(captured["data"]["processDefinitionCode"], "wf-l1")
+        self.assertEqual(captured["data"]["startNodeList"], "task-l1")
+        self.assertEqual(captured["data"]["taskDependType"], "TASK_ONLY")
+        self.assertEqual([item["name"] for item in results], ["每小时复验1级表数据(D-1)"])
 
     def test_step5_execute_fuyan_falls_back_to_workflow_style_start_when_process_style_fails(self):
         module = load_module()
@@ -295,6 +360,24 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         with mock.patch.object(module, "get_workflow_definition_detail", return_value=(True, detail, "")):
             result = module.step2_search_in_workflow("wf-asset", "dwb_asset_info")
+
+        self.assertIsNone(result)
+
+    def test_step2_search_in_workflow_requires_exact_full_table_name_match(self):
+        module = load_module()
+        detail = {
+            "processDefinition": {"name": "ODS_FOX_ARCTICFOX"},
+            "taskDefinitionList": [
+                {
+                    "code": "task-1",
+                    "name": "ods_arcticfox_collect_recovery",
+                    "taskType": "SHELL",
+                }
+            ],
+        }
+
+        with mock.patch.object(module, "get_workflow_definition_detail", return_value=(True, detail, "")):
+            result = module.step2_search_in_workflow("wf-1", "dwd_fox_collect_recovery")
 
         self.assertIsNone(result)
 
@@ -1350,7 +1433,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(dt, "2026-04-29")
 
-    def test_get_alert_window_status_uses_begin_end_window_for_lookback(self):
+    def test_get_alert_window_status_uses_latest_alert_dt_not_begin_date(self):
         module = load_module()
         row = {
             "begin": datetime(2026, 2, 8, 0, 0, 0),
@@ -1359,12 +1442,13 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         status = module.get_alert_window_status(row, now=datetime(2026, 5, 10, 10, 0, 0))
 
-        self.assertTrue(status["is_out_of_window"])
-        self.assertEqual(status["reason"], "begin_before_lookback")
+        self.assertFalse(status["is_out_of_window"])
+        self.assertEqual(status["reason"], "")
         self.assertEqual(status["begin_date"], "2026-02-08")
         self.assertEqual(status["end_date"], "2026-05-09")
+        self.assertEqual(status["latest_alert_dt"], "2026-05-08")
 
-    def test_get_remaining_alert_tables_excludes_out_of_window_rows_by_begin_end(self):
+    def test_get_remaining_alert_tables_keeps_rows_when_latest_alert_dt_is_within_window(self):
         module = load_module()
 
         rows = [
@@ -1396,7 +1480,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"alert.db_config": fake_db_module}):
             tables = module.get_remaining_alert_tables(now=datetime(2026, 5, 10, 10, 0, 0))
 
-        self.assertEqual(tables, {"dwd_recent_table"})
+        self.assertEqual(tables, {"dwd_long_window_table", "dwd_recent_table"})
 
     def test_execute_repairs_in_batches_limits_parallel_work_to_four(self):
         module = load_module()
@@ -2163,6 +2247,85 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["workflow_code"], "wf-dialog")
         self.assertEqual(tasks[0]["table"], "dwd_fox_chatbot_dialog")
         self.assertEqual(tasks[0]["task_name"], "dwd_fox_chatbot_dialog")
+
+    def test_step2_find_locations_skips_blocked_workflow_and_marks_manual_review(self):
+        module = load_module()
+        module.PRIORITY_WORKFLOWS = []
+        alerts = [{"id": 1, "table": "dwb_asset_info", "dt": "2026-05-11", "diff": 1}]
+
+        def fake_search(workflow_code, table_name):
+            if workflow_code == "wf-blocked":
+                return {
+                    "workflow_code": "wf-blocked",
+                    "workflow_name": "印尼-宽表全量工作流（1D）",
+                    "task_code": "task-asset",
+                    "task_name": "dwb_asset_info",
+                    "task_flag": "YES",
+                }
+            return None
+
+        with mock.patch.object(module, "step2_search_in_workflow", side_effect=fake_search), \
+            mock.patch.object(
+                module,
+                "get_workflow_definition_list",
+                return_value=(True, {"totalList": [{"workflowDefinitionCode": "wf-blocked"}]}, ""),
+            ), \
+            mock.patch.object(module, "log"):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "")
+        self.assertEqual(tasks[0]["workflow_name"], "印尼-宽表全量工作流（1D）")
+        self.assertIn("禁止自动修复", tasks[0]["error"])
+
+    def test_step2_find_locations_skips_blocked_workflow_and_uses_other_match(self):
+        module = load_module()
+        module.PRIORITY_WORKFLOWS = []
+        alerts = [{"id": 1, "table": "dwb_asset_info", "dt": "2026-05-11", "diff": 1}]
+        searched_codes = []
+
+        def fake_search(workflow_code, table_name):
+            searched_codes.append(workflow_code)
+            if workflow_code == "wf-blocked":
+                return {
+                    "workflow_code": "wf-blocked",
+                    "workflow_name": "印尼-宽表全量工作流（1D）",
+                    "task_code": "task-blocked",
+                    "task_name": "dwb_asset_info",
+                    "task_flag": "YES",
+                }
+            if workflow_code == "wf-good":
+                return {
+                    "workflow_code": "wf-good",
+                    "workflow_name": "印尼-数仓工作流（1H）",
+                    "task_code": "task-good",
+                    "task_name": "dwb_asset_info",
+                    "task_flag": "YES",
+                }
+            return None
+
+        with mock.patch.object(module, "step2_search_in_workflow", side_effect=fake_search), \
+            mock.patch.object(
+                module,
+                "get_workflow_definition_list",
+                return_value=(
+                    True,
+                    {
+                        "totalList": [
+                            {"workflowDefinitionCode": "wf-blocked"},
+                            {"workflowDefinitionCode": "wf-good"},
+                        ]
+                    },
+                    "",
+                ),
+            ), \
+            mock.patch.object(module, "get_schedule_map", return_value={}), \
+            mock.patch.object(module, "is_workflow_scheduled", return_value=False), \
+            mock.patch.object(module, "log"):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(searched_codes, ["wf-blocked", "wf-good"])
+        self.assertEqual(tasks[0]["workflow_code"], "wf-good")
+        self.assertEqual(tasks[0]["workflow_name"], "印尼-数仓工作流（1H）")
 
     def test_get_workflow_definition_list_falls_back_when_first_endpoint_returns_empty_success(self):
         module = load_module()

@@ -43,6 +43,16 @@ QUALITY_RESULT_TABLE = TABLE_CONFIG['quality_result_table']
 MANUAL_REVIEW_STATE_FILE = WORKSPACE_CONFIG['manual_review_state_file']
 SCAN_LOOKBACK_DAYS = REPAIR_CONFIG['scan_lookback_days']
 PRIORITY_WORKFLOWS = REPAIR_CONFIG.get('priority_workflow_codes') or []
+BLOCKED_WORKFLOW_NAMES = {
+    str(name).strip()
+    for name in (REPAIR_CONFIG.get('blocked_workflow_names') or [])
+    if str(name).strip()
+}
+BLOCKED_FUYAN_WORKFLOW_NAMES = {
+    str(name).strip()
+    for name in (REPAIR_CONFIG.get('blocked_fuyan_workflow_names') or [])
+    if str(name).strip()
+}
 DS_STATUS_DEBUG = os.environ.get('REPAIR_DEBUG_DS_STATUS', '').strip().lower() in {'1', 'true', 'yes', 'on'}
 
 # 维护任务关键词（排除）
@@ -151,12 +161,7 @@ def strip_table_prefix(value):
 def is_task_name_match(task_name, table_name):
     task_name_normalized = normalize_table_identifier(task_name)
     table_name_normalized = normalize_table_identifier(table_name)
-    stripped_table_name = strip_table_prefix(table_name)
-    return (
-        table_name_normalized == task_name_normalized
-        or stripped_table_name == task_name_normalized
-        or stripped_table_name in task_name_normalized
-    )
+    return table_name_normalized == task_name_normalized
 
 
 def sql_targets_table(sql_text, table_name):
@@ -241,9 +246,10 @@ def _get_instance_state_types_for_search(include_all=False):
     return tuple(state_types)
 
 
-def get_workflow_definition_detail(workflow_code):
+def get_workflow_definition_detail(workflow_code, project_code=None):
     """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 详情接口"""
-    endpoints = _get_definition_detail_endpoints(PROJECT_CODE, workflow_code)
+    project_code = project_code or PROJECT_CODE
+    endpoints = _get_definition_detail_endpoints(project_code, workflow_code)
     last_msg = ""
     for endpoint in endpoints:
         success, detail, msg = ds_api_get(endpoint)
@@ -626,6 +632,16 @@ def build_scheduled_parent_only_error(location):
     return f"仅匹配到带定时的父工作流，自动修复禁止直接启动该工作流，需改为命中无定时子工作流 ({workflow_name})"
 
 
+def build_blocked_workflow_error(location):
+    workflow_name = location.get('workflow_name') or '未知工作流'
+    return f"命中禁止自动修复的工作流，已转人工处理 ({workflow_name})"
+
+
+def is_blocked_workflow_match(location):
+    workflow_name = str(location.get('workflow_name') or '').strip()
+    return bool(workflow_name) and workflow_name in BLOCKED_WORKFLOW_NAMES
+
+
 def get_fuyan_name(workflow):
     return workflow.get('name') or workflow.get('workflow_name') or '未命名复验工作流'
 
@@ -636,6 +652,11 @@ def get_fuyan_code(workflow):
 
 def get_fuyan_project_code(workflow):
     return workflow.get('project_code') or workflow.get('fuyan_project_code') or FUYAN_PROJECT_CODE
+
+
+def is_blocked_fuyan_workflow(workflow):
+    workflow_name = get_fuyan_name(workflow).strip()
+    return bool(workflow_name) and workflow_name in BLOCKED_FUYAN_WORKFLOW_NAMES
 
 
 def normalize_fuyan_level(workflow):
@@ -651,25 +672,61 @@ def normalize_fuyan_level(workflow):
     return level
 
 
+def get_fuyan_start_node(workflow):
+    start_node = workflow.get('start_node') or workflow.get('startNodeList') or ''
+    if start_node:
+        return str(start_node).strip()
+
+    if normalize_fuyan_level(workflow) == '1':
+        return '复验1级表'
+    return ''
+
+
+def resolve_fuyan_start_node_code(workflow):
+    start_node_name = get_fuyan_start_node(workflow)
+    if not start_node_name:
+        return ''
+
+    success, detail, _ = get_workflow_definition_detail(
+        get_fuyan_code(workflow),
+        get_fuyan_project_code(workflow),
+    )
+    if not success:
+        return start_node_name
+
+    for task in detail.get('taskDefinitionList', []):
+        if str(task.get('name') or '').strip() == start_node_name:
+            task_code = task.get('code')
+            if task_code not in (None, ''):
+                return str(task_code)
+
+    return start_node_name
+
+
 def select_fuyan_workflows(alerts):
-    """按旧策略智能选择复验工作流：每日全级别必跑，dwb 走1级，其余走3级"""
+    """智能选择复验工作流：dwb 仅走1级，其余走1级 + 每日全级别 + 3级"""
     selected_levels = set()
+    has_dwb_alert = False
     for alert in alerts or []:
         table = (alert.get('table') or '').lower()
         if table.startswith('dwb_'):
+            has_dwb_alert = True
             selected_levels.add('1')
         else:
+            selected_levels.add('1')
             selected_levels.add('3')
 
     selected = []
     seen_codes = set()
     for workflow in FUYAN_WORKFLOWS:
+        if is_blocked_fuyan_workflow(workflow):
+            continue
         workflow_code = get_fuyan_code(workflow)
         workflow_level = normalize_fuyan_level(workflow)
         workflow_name = get_fuyan_name(workflow)
         include = False
         if workflow_level == 'all':
-            include = workflow_name.startswith('每日复验全级别数据')
+            include = (not has_dwb_alert) and workflow_name.startswith('每日复验全级别数据')
         elif workflow_level in selected_levels:
             include = True
 
@@ -751,38 +808,44 @@ def resolve_alert_dt(row, now=None):
 
 
 def get_alert_window_status(row, now=None, lookback_days=None):
-    """根据告警 begin/end 窗口判断是否超出自动修复范围。"""
+    """根据告警最近一次命中的日期判断是否超出自动修复范围。"""
     if now is None:
         now = datetime.now()
     if lookback_days is None:
         lookback_days = SCAN_LOOKBACK_DAYS
 
     lookback_start = now.date() - timedelta(days=lookback_days)
+    repair_dt_text = resolve_alert_dt(row, now=now)
+    repair_dt = None
+    try:
+        repair_dt = datetime.strptime(repair_dt_text, '%Y-%m-%d').date() if repair_dt_text else None
+    except ValueError:
+        repair_dt = None
+
     begin_time = normalize_to_datetime(row.get('begin'))
     end_time = normalize_to_datetime(row.get('end'))
     begin_date = begin_time.date() if begin_time else None
     end_date = end_time.date() if end_time else None
+    latest_alert_date = None
+    if end_date:
+        latest_alert_date = end_date - timedelta(days=1)
+    elif begin_date:
+        latest_alert_date = begin_date
 
     status = {
         'is_out_of_window': False,
         'reason': '',
         'begin_date': begin_date.isoformat() if begin_date else None,
         'end_date': end_date.isoformat() if end_date else None,
+        'repair_dt': repair_dt.isoformat() if repair_dt else repair_dt_text,
+        'latest_alert_dt': latest_alert_date.isoformat() if latest_alert_date else None,
         'lookback_start': lookback_start.isoformat(),
     }
 
-    if begin_date and begin_date < lookback_start:
+    if latest_alert_date and latest_alert_date < lookback_start:
         status['is_out_of_window'] = True
-        status['reason'] = 'begin_before_lookback'
+        status['reason'] = 'latest_alert_dt_before_lookback'
         return status
-
-    if begin_date and end_date:
-        # end 常常是开区间的次日边界，这里按自然日跨度来控制自动修复范围。
-        covered_days = max((end_date - begin_date).days, 0)
-        if covered_days > lookback_days:
-            status['is_out_of_window'] = True
-            status['reason'] = 'window_span_exceeded'
-            return status
 
     return status
 
@@ -904,15 +967,11 @@ def step1_scan_alerts(now=None):
                     begin_text = window_status.get('begin_date') or '未知'
                     end_text = window_status.get('end_date') or '未知'
                     alert['status'] = 'skipped_out_of_window'
-                    if window_status['reason'] == 'begin_before_lookback':
+                    if window_status['reason'] == 'latest_alert_dt_before_lookback':
                         alert['error'] = (
                             f"告警窗口 begin={begin_text}, end={end_text}，"
-                            f"begin 早于自动修复窗口起点 {window_status['lookback_start']}，转人工处理"
-                        )
-                    else:
-                        alert['error'] = (
-                            f"告警窗口 begin={begin_text}, end={end_text}，"
-                            f"覆盖天数超过自动修复窗口 {SCAN_LOOKBACK_DAYS}天，转人工处理"
+                            f"最新告警日期 dt={window_status.get('latest_alert_dt') or window_status.get('repair_dt') or '未知'} 早于自动修复窗口起点 "
+                            f"{window_status['lookback_start']}，转人工处理"
                         )
                 alerts.append(alert)
         
@@ -1127,11 +1186,16 @@ def step2_find_locations(alerts):
         
         location = None
         scheduled_location = None
+        blocked_location = None
         # 先在优先工作流中搜索
         for wf_code, wf_name in priority_workflows:
             for search_table in search_tables:
                 result = step2_search_in_workflow(wf_code, search_table)
                 if not result:
+                    continue
+                if is_blocked_workflow_match(result):
+                    if blocked_location is None:
+                        blocked_location = result
                     continue
                 if schedule_map is None:
                     schedule_map = get_schedule_map()
@@ -1171,6 +1235,10 @@ def step2_find_locations(alerts):
                     for search_table in search_tables:
                         result = step2_search_in_workflow(wf_code, search_table)
                         if not result:
+                            continue
+                        if is_blocked_workflow_match(result):
+                            if blocked_location is None:
+                                blocked_location = result
                             continue
                         if schedule_map is None:
                             schedule_map = get_schedule_map()
@@ -1218,6 +1286,24 @@ def step2_find_locations(alerts):
                 'task_code': '',
                 'task_name': scheduled_location.get('task_name', ''),
                 'task_flag': scheduled_location.get('task_flag', ''),
+                'error': error_msg,
+            }
+            log(f"  ⏭️ {error_msg}")
+        elif blocked_location:
+            error_msg = build_blocked_workflow_error(blocked_location)
+            task = {
+                'alert_id': alert['id'],
+                'table': table,
+                'src_tbl': alert.get('src_tbl', ''),
+                'dest_tbl': alert.get('dest_tbl', ''),
+                'search_tables': search_tables,
+                'dt': alert['dt'],
+                'diff': alert.get('diff'),
+                'workflow_code': '',
+                'workflow_name': blocked_location['workflow_name'],
+                'task_code': '',
+                'task_name': blocked_location.get('task_name', ''),
+                'task_flag': blocked_location.get('task_flag', ''),
                 'error': error_msg,
             }
             log(f"  ⏭️ {error_msg}")
@@ -1694,11 +1780,17 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
     fuyan_results = []
 
     log(f"  选中复验工作流: {len(fuyan_workflows)} 个")
+    if not fuyan_workflows:
+        blocked_names = "、".join(sorted(BLOCKED_FUYAN_WORKFLOW_NAMES))
+        if blocked_names:
+            log(f"  ℹ️ 当前集群已禁用以下复验工作流，避免触发循环: {blocked_names}")
+        return []
     
     for i, fuyan in enumerate(fuyan_workflows, 1):
         fuyan_name = get_fuyan_name(fuyan)
         fuyan_code = get_fuyan_code(fuyan)
         fuyan_project_code = get_fuyan_project_code(fuyan)
+        fuyan_start_node = resolve_fuyan_start_node_code(fuyan)
         log(f"  [{i}] {fuyan_name}")
         
         data = {
@@ -1711,10 +1803,14 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
             'execType': 'START_PROCESS',
             'environmentCode': DS_ENVIRONMENT_CODE,
             'tenantCode': DS_TENANT_CODE,
-            'taskDependType': 'TASK_POST',
             'runMode': 'RUN_MODE_SERIAL',
             'dryRun': 0,
         }
+        if fuyan_start_node:
+            data['startNodeList'] = fuyan_start_node
+            data['taskDependType'] = 'TASK_ONLY'
+        else:
+            data['taskDependType'] = 'TASK_POST'
 
         success, result, msg, _, _, launched_at = start_workflow_instance_with_fallbacks(
             fuyan_project_code,

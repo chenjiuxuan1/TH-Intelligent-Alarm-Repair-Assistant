@@ -198,8 +198,20 @@ TABLE_CONFIG = {
 
 
 REPAIR_CONFIG = {
-    "scan_lookback_days": int(_get_env("SCAN_LOOKBACK_DAYS", "7")),
+    "scan_lookback_days": int(_get_env("SCAN_LOOKBACK_DAYS", "8")),
     "priority_workflow_codes": json.loads(_get_env("PRIORITY_WORKFLOW_CODES_JSON", "[]")),
+    "blocked_workflow_names": json.loads(
+        _get_env(
+            "BLOCKED_WORKFLOW_NAMES_JSON",
+            '["印尼-宽表全量工作流（1D）"]',
+        )
+    ),
+    "blocked_fuyan_workflow_names": json.loads(
+        _get_env(
+            "BLOCKED_FUYAN_WORKFLOW_NAMES_JSON",
+            "[]",
+        )
+    ),
 }
 
 
