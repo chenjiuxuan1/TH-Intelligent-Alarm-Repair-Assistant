@@ -476,6 +476,7 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
 
     workflow_code_str = str(workflow_code)
     launched_at_dt = parse_ds_datetime(launched_at)
+    prelaunch_skew_seconds = 15
     candidates = []
 
     for state_type in state_types:
@@ -491,6 +492,9 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
             start_dt = parse_ds_datetime(item.get('startTime'))
             if launched_at_dt and start_dt:
                 if start_dt < launched_at_dt:
+                    if (launched_at_dt - start_dt).total_seconds() <= prelaunch_skew_seconds:
+                        candidates.append(item)
+                        continue
                     continue
                 diff_seconds = abs((start_dt - launched_at_dt).total_seconds())
                 if diff_seconds > 600:
@@ -516,6 +520,46 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
         f"{candidates[0].get('id')} state={candidates[0].get('state')}"
     )
     return candidates[0]
+
+
+def maybe_replace_with_recent_real_instance(project_code, item, current_instance):
+    """当启动回执实例状态不可信时，优先切换到同工作流的真实实例。"""
+    task_context = item.get('task') or item
+    workflow_code = item.get('workflow_code') or task_context.get('workflow_code')
+    if not workflow_code:
+        return current_instance
+
+    current_id = str((current_instance or {}).get('id') or item.get('instance_id') or '')
+    start_response_id = str(item.get('start_response_id') or '')
+    should_recheck_recent = (
+        not item.get('resolved_instance_id')
+        or (start_response_id and current_id == start_response_id)
+    )
+    if not should_recheck_recent:
+        return current_instance
+
+    recent_instance = find_recent_instance_by_workflow(
+        project_code,
+        workflow_code,
+        launched_at=task_context.get('launched_at'),
+        state_types=('RUNNING_EXECUTION', 'SUCCESS', 'FAILURE', 'READY_STOP', 'FINISHED', None),
+    )
+    recent_id = str(recent_instance.get('id') or '')
+    if not recent_id or recent_id == current_id:
+        return current_instance
+
+    item['resolved_instance_id'] = recent_instance.get('id')
+    item['instance_id'] = recent_instance.get('id')
+    if item.get('task'):
+        item['task']['instance_id'] = recent_instance.get('id')
+    else:
+        item['id'] = recent_instance.get('id')
+    debug_log(
+        f"切换到近期真实实例 table={item.get('table') or item.get('name')} "
+        f"start_response_id={item.get('start_response_id')} recent_instance_id={recent_instance.get('id')} "
+        f"recent_state={recent_instance.get('state')}"
+    )
+    return recent_instance
 
 
 def collect_instance_query_diagnostics(project_code, instance_id, workflow_code=None, launched_at=None):
@@ -1608,6 +1652,7 @@ def step4_wait_and_check(running_instances, poll_interval=10, max_wait=60):
                         msg = ''
             
             if success and data:
+                data = maybe_replace_with_recent_real_instance(PROJECT_CODE, item, data)
                 state = data.get('state', 'UNKNOWN')
                 if data.get('id') is not None:
                     item['instance_id'] = data.get('id')
@@ -1924,6 +1969,7 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
                     still_pending[str(item.get('id'))] = item
                 continue
 
+            data = maybe_replace_with_recent_real_instance(fuyan_project_code, item, data)
             state = data.get('state', 'UNKNOWN')
             if data.get('id') is not None:
                 item['id'] = data.get('id')

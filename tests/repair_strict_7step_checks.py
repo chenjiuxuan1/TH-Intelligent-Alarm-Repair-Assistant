@@ -839,6 +839,58 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(completed[0]["instance_id"], 22222)
         self.assertEqual(failed, [])
 
+    def test_step4_wait_and_check_prefers_recent_real_instance_over_stop_start_receipt(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+        running_instances = [
+            {
+                "table": "dwd_asset_spv_pledges_asset",
+                "instance_id": 21680180058848,
+                "start_response_id": 21680180058848,
+                "resolved_instance_id": None,
+                "workflow_code": "18641948384363",
+                "task": {
+                    "table": "dwd_asset_spv_pledges_asset",
+                    "instance_id": 21680180058848,
+                    "workflow_code": "18641948384363",
+                    "launched_at": "2026-05-15 09:00:06",
+                },
+            }
+        ]
+
+        def fake_get_instance_detail(project_code, instance_id):
+            if instance_id == 1534334:
+                return True, {"id": 1534334, "state": "SUCCESS", "endTime": "2026-05-15 09:07:17"}, ""
+            return True, {"id": 21680180058848, "state": "STOP", "endTime": "2026-05-15 09:00:25"}, ""
+
+        with mock.patch.object(
+            module,
+            "find_recent_instance_by_workflow",
+            side_effect=[
+                {},
+                {"id": 1534334, "state": "SUCCESS", "startTime": "2026-05-15 09:00:04", "endTime": "2026-05-15 09:07:17"},
+            ],
+        ), mock.patch.object(
+            module,
+            "get_instance_detail",
+            side_effect=fake_get_instance_detail,
+        ), mock.patch.object(
+            module,
+            "get_instance_from_list",
+            return_value={},
+        ), mock.patch.object(module, "log"), mock.patch("time.sleep"):
+            completed, failed = module.step4_wait_and_check(
+                running_instances,
+                poll_interval=1,
+                max_wait=10,
+            )
+
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["instance_id"], 1534334)
+        self.assertEqual(completed[0]["final_status"], "success")
+        self.assertEqual(failed, [])
+
     def test_get_instance_from_list_avoids_all_state_for_process_mode(self):
         module = load_module()
         module.DS_API_MODE = "process_v2"
@@ -919,6 +971,35 @@ class RepairStrict7StepTests(unittest.TestCase):
             )
 
         self.assertEqual(result, {})
+
+    def test_find_recent_instance_by_workflow_tolerates_small_clock_skew_before_launch(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+
+        running_items = [
+            {
+                "id": 1534334,
+                "state": "RUNNING_EXECUTION",
+                "startTime": "2026-05-15 09:00:04",
+                "processDefinitionCode": 18641948384363,
+                "commandType": "START_PROCESS",
+            }
+        ]
+
+        def fake_get_all_instances_from_lists(project_code, state_type='ALL'):
+            if state_type == "RUNNING_EXECUTION":
+                return running_items
+            return []
+
+        with mock.patch.object(module, "get_all_instances_from_lists", side_effect=fake_get_all_instances_from_lists):
+            result = module.find_recent_instance_by_workflow(
+                "default-project",
+                "18641948384363",
+                launched_at="2026-05-15 09:00:06",
+            )
+
+        self.assertEqual(result["id"], 1534334)
 
     def test_get_instance_detail_uses_configured_process_instance_style(self):
         module = load_module()
