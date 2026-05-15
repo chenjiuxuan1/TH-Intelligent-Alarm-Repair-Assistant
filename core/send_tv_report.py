@@ -35,17 +35,13 @@ def send_tv_report(message, mentions=None):
     """
     if mentions is None:
         mentions = []
-
-    text = message
-    if mentions:
-        mention_lines = [f"@{item}" for item in mentions]
-        text = f"{message}\n\n" + "\n".join(mention_lines)
     
     # TV API 实测要求顶层必须包含 message 字段。
     payload = {
         'appId': TV_APP_ID,
         'botId': TV_BOT_ID,
-        'message': text
+        'message': message,
+        'mentions': mentions,
     }
     
     # 转换为JSON

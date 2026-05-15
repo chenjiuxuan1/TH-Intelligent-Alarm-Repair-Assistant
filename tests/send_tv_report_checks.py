@@ -76,7 +76,30 @@ class SendTvReportTests(unittest.TestCase):
             {
                 "appId": "alert",
                 "botId": module.TV_BOT_ID,
-                "message": "报告内容\n\n@user@example.com",
+                "message": "报告内容",
+                "mentions": ["user@example.com"],
+            },
+        )
+
+    def test_send_tv_report_sends_empty_mentions_list_when_not_provided(self):
+        module = load_module()
+        captured = {}
+
+        def fake_urlopen(request, timeout=0):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse(202, '{"ok":true}')
+
+        with mock.patch.object(module.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = module.send_tv_report("报告内容")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(
+            captured["body"],
+            {
+                "appId": "alert",
+                "botId": module.TV_BOT_ID,
+                "message": "报告内容",
+                "mentions": [],
             },
         )
 
