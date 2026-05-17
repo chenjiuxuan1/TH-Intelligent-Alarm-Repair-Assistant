@@ -112,7 +112,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertIn("最新告警日期", alerts[0]["error"])
         self.assertIn("2026-05-02", alerts[0]["error"])
 
-    def test_step1_scan_alerts_keeps_alert_when_latest_alert_dt_is_within_lookback(self):
+    def test_step1_scan_alerts_marks_long_window_alert_as_manual_review(self):
         module = load_module()
         rows = [
             {
@@ -141,7 +141,8 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(len(alerts), 1)
         self.assertEqual(alerts[0]["table"], "dwd_long_window_table")
-        self.assertNotIn("status", alerts[0])
+        self.assertEqual(alerts[0]["status"], "skipped_out_of_window")
+        self.assertIn("跨度 90 天超过自动修复阈值 8 天", alerts[0]["error"])
 
     def test_step5_execute_fuyan_accepts_workflow_name_style_config(self):
         module = load_module()
@@ -1550,7 +1551,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(dt, "2026-04-29")
 
-    def test_get_alert_window_status_uses_latest_alert_dt_not_begin_date(self):
+    def test_get_alert_window_status_marks_long_span_out_of_window(self):
         module = load_module()
         row = {
             "begin": datetime(2026, 2, 8, 0, 0, 0),
@@ -1559,13 +1560,27 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         status = module.get_alert_window_status(row, now=datetime(2026, 5, 10, 10, 0, 0))
 
-        self.assertFalse(status["is_out_of_window"])
-        self.assertEqual(status["reason"], "")
+        self.assertTrue(status["is_out_of_window"])
+        self.assertEqual(status["reason"], "window_span_exceeds_limit")
         self.assertEqual(status["begin_date"], "2026-02-08")
         self.assertEqual(status["end_date"], "2026-05-09")
         self.assertEqual(status["latest_alert_dt"], "2026-05-08")
+        self.assertGreater(status["window_span_days"], 8)
 
-    def test_get_remaining_alert_tables_keeps_rows_when_latest_alert_dt_is_within_window(self):
+    def test_get_alert_window_status_allows_span_of_exactly_eight_days(self):
+        module = load_module()
+        row = {
+            "begin": datetime(2026, 5, 1, 0, 0, 0),
+            "end": datetime(2026, 5, 9, 0, 0, 0),
+        }
+
+        status = module.get_alert_window_status(row, now=datetime(2026, 5, 10, 10, 0, 0))
+
+        self.assertFalse(status["is_out_of_window"])
+        self.assertEqual(status["reason"], "")
+        self.assertEqual(status["window_span_days"], 8)
+
+    def test_get_remaining_alert_tables_excludes_rows_when_window_span_exceeds_limit(self):
         module = load_module()
 
         rows = [
@@ -1597,7 +1612,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"alert.db_config": fake_db_module}):
             tables = module.get_remaining_alert_tables(now=datetime(2026, 5, 10, 10, 0, 0))
 
-        self.assertEqual(tables, {"dwd_long_window_table", "dwd_recent_table"})
+        self.assertEqual(tables, {"dwd_recent_table"})
 
     def test_execute_repairs_in_batches_limits_parallel_work_to_four(self):
         module = load_module()
