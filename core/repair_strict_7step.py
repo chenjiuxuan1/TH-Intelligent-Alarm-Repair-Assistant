@@ -136,10 +136,12 @@ def _extract_instance_id_from_start_result(result):
 
 def build_start_params_payloads(dt):
     """兼容不同 DS 集群对 startParams 的 JSON 结构要求。"""
+    key_value_map = {'dt': dt}
     property_list = [{'prop': 'dt', 'direct': 'IN', 'type': 'VARCHAR', 'value': dt}]
     global_wrapper = {'global': property_list}
 
     return [
+        json.dumps(key_value_map),
         json.dumps(property_list),
         json.dumps(global_wrapper),
     ]
@@ -148,7 +150,14 @@ def build_start_params_payloads(dt):
 def should_retry_with_property_list_start_params(message):
     text = str(message or '')
     lowered = text.lower()
-    return 'parse json' in lowered and ('property failed' in lowered or 'property list failed' in lowered)
+    return (
+        'startparams' in lowered
+        or 'start params' in lowered
+        or 'parse json' in lowered
+        or 'property failed' in lowered
+        or 'property list failed' in lowered
+        or 'map failed' in lowered
+    )
 
 
 def normalize_table_identifier(value):
