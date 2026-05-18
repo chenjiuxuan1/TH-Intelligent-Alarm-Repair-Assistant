@@ -187,7 +187,7 @@ DB_CONFIG = {
 
 OPENCLAW_CONFIG = {
     "webhook": _get_env("OPENCLAW_WEBHOOK", "http://127.0.0.1:18789/hooks/wattrel/wake"),
-    "token": _get_env("OPENCLAW_HOOK_TOKEN", "wattrel-webhook-secret-token-2026"),
+    "token": _get_env("OPENCLAW_HOOK_TOKEN", ""),
 }
 
 

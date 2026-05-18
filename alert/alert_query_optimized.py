@@ -33,7 +33,7 @@ DB_CONFIG = {
 }
 
 OPENCLAW_WEBHOOK = os.environ.get('OPENCLAW_WEBHOOK', 'http://127.0.0.1:18789/hooks/wattrel/wake')
-OPENCLAW_HOOK_TOKEN = os.environ.get('OPENCLAW_HOOK_TOKEN', 'wattrel-webhook-secret-token-2026')
+OPENCLAW_HOOK_TOKEN = os.environ.get('OPENCLAW_HOOK_TOKEN', '')
 # ==========================================
 
 
