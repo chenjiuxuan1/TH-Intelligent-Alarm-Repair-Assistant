@@ -1008,6 +1008,42 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(result, {})
 
+    def test_find_recent_instance_by_workflow_falls_back_to_latest_non_scheduler_when_time_zone_differs(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        module.DS_INSTANCE_ENDPOINT_STYLE = "process-instances"
+
+        success_items = [
+            {
+                "id": 3159308,
+                "state": "SUCCESS",
+                "startTime": "2026-05-11 09:35:01",
+                "processDefinitionCode": 16916802671296,
+                "commandType": "SCHEDULER",
+            },
+            {
+                "id": 3159315,
+                "state": "SUCCESS",
+                "startTime": "2026-05-11 09:35:46",
+                "processDefinitionCode": 16916802671296,
+                "commandType": "START_PROCESS",
+            },
+        ]
+
+        def fake_get_all_instances_from_lists(project_code, state_type='ALL'):
+            if state_type == "SUCCESS":
+                return success_items
+            return []
+
+        with mock.patch.object(module, "get_all_instances_from_lists", side_effect=fake_get_all_instances_from_lists):
+            result = module.find_recent_instance_by_workflow(
+                "default-project",
+                "16916802671296",
+                launched_at="2026-05-10 20:35:44",
+            )
+
+        self.assertEqual(result["id"], 3159315)
+
     def test_find_recent_instance_by_workflow_tolerates_small_clock_skew_before_launch(self):
         module = load_module()
         module.DS_API_MODE = "process_v2"

@@ -493,6 +493,7 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
     launched_at_dt = parse_ds_datetime(launched_at)
     prelaunch_skew_seconds = 15
     candidates = []
+    non_scheduler_fallback_candidates = []
 
     for state_type in state_types:
         for item in get_all_instances_from_lists(project_code, state_type=state_type):
@@ -503,6 +504,10 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
             )
             if str(item_workflow_code) != workflow_code_str:
                 continue
+
+            command_type = str(item.get('commandType') or '').upper()
+            if command_type != 'SCHEDULER':
+                non_scheduler_fallback_candidates.append(item)
 
             start_dt = parse_ds_datetime(item.get('startTime'))
             if launched_at_dt and start_dt:
@@ -517,6 +522,21 @@ def find_recent_instance_by_workflow(project_code, workflow_code, launched_at=No
             candidates.append(item)
 
     if not candidates:
+        if non_scheduler_fallback_candidates:
+            non_scheduler_fallback_candidates.sort(
+                key=lambda item: (
+                    parse_ds_datetime(item.get('startTime')).timestamp()
+                    if parse_ds_datetime(item.get('startTime'))
+                    else float('-inf')
+                ),
+                reverse=True,
+            )
+            selected = non_scheduler_fallback_candidates[0]
+            debug_log(
+                f"工作流 {workflow_code} 未按启动时间匹配到实例，回退选中最近非调度实例 "
+                f"id={selected.get('id')} state={selected.get('state')} startTime={selected.get('startTime')}"
+            )
+            return selected
         debug_log(
             f"未找到工作流 {workflow_code} 的近期实例，launched_at={launched_at}, "
             f"state_types={state_types}"
