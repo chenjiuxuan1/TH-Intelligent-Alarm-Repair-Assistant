@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 
-MODULE_PATH = "/Users/jiangchuanchen/Desktop/PH-Intelligent-Alarm-Repair-Assistant/config/config.py"
+MODULE_PATH = "/Users/jiangchuanchen/Desktop/MX-Intelligent-Alarm-Repair-Assistant/config/config.py"
 
 
 def load_module():

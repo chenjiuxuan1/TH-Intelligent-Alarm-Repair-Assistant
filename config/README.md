@@ -27,4 +27,4 @@ export DB_USER='your_db_user'
 export DB_NAME='your_db_name'
 ```
 
-完整变量说明、复验工作流 JSON 格式和多国家迁移清单见 [docs/country-config-migration.md](/Users/jiangchuanchen/Desktop/PH-Intelligent-Alarm-Repair-Assistant/docs/country-config-migration.md)。
+完整变量说明、复验工作流 JSON 格式和多国家迁移清单见 [docs/country-config-migration.md](/Users/jiangchuanchen/Desktop/MX-Intelligent-Alarm-Repair-Assistant/docs/country-config-migration.md)。
