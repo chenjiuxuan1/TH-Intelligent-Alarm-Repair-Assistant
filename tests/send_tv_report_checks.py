@@ -76,7 +76,7 @@ class SendTvReportTests(unittest.TestCase):
             {
                 "appId": "alert",
                 "botId": module.TV_BOT_ID,
-                "message": "报告内容\n\n📣 通知: @user@example.com",
+                "message": "报告内容",
                 "mentions": ["user@example.com"],
             },
         )
