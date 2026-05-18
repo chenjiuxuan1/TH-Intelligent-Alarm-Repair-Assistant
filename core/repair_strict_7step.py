@@ -54,6 +54,9 @@ BLOCKED_FUYAN_WORKFLOW_NAMES = {
     if str(name).strip()
 }
 DS_STATUS_DEBUG = os.environ.get('REPAIR_DEBUG_DS_STATUS', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+REPAIR_TASK_POLL_INTERVAL_SECONDS = int(os.environ.get('REPAIR_TASK_POLL_INTERVAL_SECONDS', '30'))
+REPAIR_TASK_MAX_WAIT_SECONDS = int(os.environ.get('REPAIR_TASK_MAX_WAIT_SECONDS', '1800'))
+REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS = int(os.environ.get('REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS', '1800'))
 
 # 维护任务关键词（排除）
 MAINTENANCE_KEYWORDS = ['补充', '删除', '清理', '修复', '历史', '冗余', '临时', 'test', 'copy', '手插入']
@@ -669,6 +672,36 @@ def build_conflicting_instance_error(conflict_instance):
         f"目标工作流已有运行中实例，跳过本次重跑以避开调度冲突 "
         f"(实例ID: {instance_id}, 启动类型: {command_type}, 状态: {state})"
     )
+
+
+def wait_for_workflow_conflict_clear(project_code, workflow_code, poll_interval=None, max_wait=None):
+    """等待同一工作流的运行中实例结束，避免并发启动同一工作流内的多个单点任务。"""
+    if poll_interval is None:
+        poll_interval = REPAIR_TASK_POLL_INTERVAL_SECONDS
+    if max_wait is None:
+        max_wait = REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS
+
+    start_time = time.time()
+    last_conflict = None
+
+    while True:
+        conflict_instance = find_conflicting_running_instance(project_code, workflow_code)
+        if not conflict_instance:
+            return True, None
+
+        last_conflict = conflict_instance
+        elapsed = int(time.time() - start_time)
+        if elapsed >= max_wait:
+            return False, last_conflict
+
+        instance_id = conflict_instance.get('id', '未知')
+        command_type = conflict_instance.get('commandType') or 'UNKNOWN'
+        state = conflict_instance.get('state') or 'UNKNOWN'
+        log(
+            f"  ⏳ 同工作流已有运行实例，等待结束后再启动 "
+            f"(实例ID: {instance_id}, 启动类型: {command_type}, 状态: {state}, 已等待 {elapsed}s)"
+        )
+        time.sleep(poll_interval)
 
 
 def is_workflow_scheduled(workflow_code, schedule_map):
@@ -1532,12 +1565,18 @@ def step3_start_repair(tasks):
 
         conflict_instance = find_conflicting_running_instance(PROJECT_CODE, workflow_code)
         if conflict_instance:
-            error_msg = build_conflicting_instance_error(conflict_instance)
-            log(f"  ⏭️ 跳过启动: {error_msg}")
-            task['status'] = 'failed'
-            task['error'] = error_msg
-            results.append(task)
-            continue
+            wait_success, remaining_conflict = wait_for_workflow_conflict_clear(
+                PROJECT_CODE,
+                workflow_code,
+            )
+            if not wait_success:
+                error_msg = build_conflicting_instance_error(remaining_conflict or conflict_instance)
+                log(f"  ⏭️ 等待超时，跳过启动: {error_msg}")
+                task['status'] = 'failed'
+                task['error'] = error_msg
+                results.append(task)
+                continue
+            log("  ✅ 同工作流运行实例已结束，继续启动当前任务")
         
         base_data = {
             'startNodeList': task_code,
@@ -1590,11 +1629,16 @@ def step3_start_repair(tasks):
     return results, running_instances
 
 
-def step4_wait_and_check(running_instances, poll_interval=10, max_wait=60):
+def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
     """步骤4: 动态监控任务状态（每30秒检查一次）- 修复版（增加失败次数限制）"""
     if not running_instances:
         log("\n  没有需要等待的任务")
         return [], []
+
+    if poll_interval is None:
+        poll_interval = REPAIR_TASK_POLL_INTERVAL_SECONDS
+    if max_wait is None:
+        max_wait = REPAIR_TASK_MAX_WAIT_SECONDS
     
     log("\n" + "="*70)
     log("【步骤4】动态监控任务状态")
