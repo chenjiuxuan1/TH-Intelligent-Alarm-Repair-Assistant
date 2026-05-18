@@ -414,7 +414,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(captured["data"]["scheduleTime"], "")
         self.assertEqual(
             captured["data"]["startParams"],
-            '{"global": [{"prop": "dt", "value": "2026-04-29"}]}',
+            '[{"prop": "dt", "direct": "IN", "type": "VARCHAR", "value": "2026-04-29"}]',
         )
         self.assertEqual(results[0]["instance_id"], 12345)
         self.assertEqual(running_instances[0]["instance_id"], 12345)
@@ -452,7 +452,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["instance_id"], 67890)
         self.assertEqual(running_instances[0]["instance_id"], 67890)
 
-    def test_step3_start_repair_falls_back_to_property_list_start_params_when_global_wrapper_is_rejected(self):
+    def test_step3_start_repair_falls_back_to_global_wrapper_when_property_list_is_rejected(self):
         module = load_module()
         tasks = [
             {
@@ -469,7 +469,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         def fake_ds_api_post(endpoint, data):
             attempts.append((endpoint, dict(data)))
             if len(attempts) == 1:
-                return False, {}, 'start workflow instance error:Parse json: {"global": [{"prop": "dt", "value": "2026-05-11"}]} to list of class: org.apache.dolphinscheduler.plugin.task.api.model.Property failed'
+                return False, {}, 'start workflow instance error:Parse json property list failed'
             return True, {"data": [13579]}, ""
 
         with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
@@ -481,11 +481,11 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual(
             attempts[0][1]["startParams"],
-            '{"global": [{"prop": "dt", "value": "2026-05-11"}]}',
+            '[{"prop": "dt", "direct": "IN", "type": "VARCHAR", "value": "2026-05-11"}]',
         )
         self.assertEqual(
             attempts[1][1]["startParams"],
-            '[{"prop": "dt", "value": "2026-05-11"}]',
+            '{"global": [{"prop": "dt", "direct": "IN", "type": "VARCHAR", "value": "2026-05-11"}]}',
         )
         self.assertEqual(results[0]["instance_id"], 13579)
         self.assertEqual(running_instances[0]["instance_id"], 13579)
