@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 
-MODULE_PATH = "/Users/jiangchuanchen/Desktop/MX-Intelligent-Alarm-Repair-Assistant/tools/task_execution_checker.py"
+MODULE_PATH = "/Users/jiangchuanchen/Desktop/TH-Intelligent-Alarm-Repair-Assistant/tools/task_execution_checker.py"
 
 
 def load_module():
@@ -17,7 +17,7 @@ def load_module():
 class TaskExecutionCheckerTests(unittest.TestCase):
     def test_checker_falls_back_to_repo_root_when_configured_workspace_is_invalid(self):
         existing_paths = {
-            "/Users/jiangchuanchen/Desktop/MX-Intelligent-Alarm-Repair-Assistant/core/repair_strict_7step.py"
+            "/Users/jiangchuanchen/Desktop/TH-Intelligent-Alarm-Repair-Assistant/core/repair_strict_7step.py"
         }
 
         with mock.patch.dict(os.environ, {"APP_WORKSPACE": "/invalid/workspace"}, clear=False), mock.patch(
@@ -27,7 +27,7 @@ class TaskExecutionCheckerTests(unittest.TestCase):
 
         self.assertEqual(
             module.EFFECTIVE_WORKSPACE_ROOT,
-            "/Users/jiangchuanchen/Desktop/MX-Intelligent-Alarm-Repair-Assistant",
+            "/Users/jiangchuanchen/Desktop/TH-Intelligent-Alarm-Repair-Assistant",
         )
         self.assertTrue(module.check_script_exists("core/repair_strict_7step.py"))
 

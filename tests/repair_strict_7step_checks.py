@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from unittest import mock
 
 
-MODULE_PATH = "/Users/jiangchuanchen/Desktop/MX-Intelligent-Alarm-Repair-Assistant/core/repair_strict_7step.py"
+MODULE_PATH = "/Users/jiangchuanchen/Desktop/TH-Intelligent-Alarm-Repair-Assistant/core/repair_strict_7step.py"
 
 
 def load_module():

@@ -101,7 +101,7 @@ export DS_TENANT_CODE='your_tenant_code'
 export DB_PASSWORD='your_password'
 ```
 
-多国家迁移说明见 [docs/country-config-migration.md](/Users/jiangchuanchen/Desktop/MX-Intelligent-Alarm-Repair-Assistant/docs/country-config-migration.md)。
+多国家迁移说明见 [docs/country-config-migration.md](/Users/jiangchuanchen/Desktop/TH-Intelligent-Alarm-Repair-Assistant/docs/country-config-migration.md)。
 
 ### 首次部署（复现指南）
 
