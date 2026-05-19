@@ -31,6 +31,34 @@ class TaskExecutionCheckerTests(unittest.TestCase):
         )
         self.assertTrue(module.check_script_exists("core/repair_strict_7step.py"))
 
+    def test_env_check_accepts_runtime_environment_over_placeholders(self):
+        with mock.patch.dict(
+            os.environ,
+            {"DS_TOKEN": "token-from-runtime", "DB_PASSWORD": "db-pass-from-runtime"},
+            clear=False,
+        ):
+            module = load_module()
+            module.DS_CONFIG["token"] = "REPLACE_WITH_TH_DS_TOKEN"
+            module.DB_CONFIG["password"] = "REPLACE_WITH_TH_DB_PASSWORD"
+
+            self.assertEqual(module.check_env_variables(), [])
+
+    def test_env_check_treats_placeholders_as_missing(self):
+        module = load_module()
+        module.DS_CONFIG["token"] = "REPLACE_WITH_TH_DS_TOKEN"
+        module.DB_CONFIG["password"] = "REPLACE_WITH_TH_DB_PASSWORD"
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(module.check_env_variables(), ["DS_TOKEN", "DB_PASSWORD"])
+
+    def test_env_check_accepts_real_values_from_loaded_config(self):
+        module = load_module()
+        module.DS_CONFIG["token"] = "token-from-local-config"
+        module.DB_CONFIG["password"] = "db-pass-from-local-config"
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(module.check_env_variables(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

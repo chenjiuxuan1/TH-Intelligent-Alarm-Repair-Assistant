@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config.config import WORKSPACE_CONFIG
+from config.config import DB_CONFIG, DS_CONFIG, WORKSPACE_CONFIG
 
 
 WORKSPACE_ROOT = WORKSPACE_CONFIG['root']
@@ -92,13 +92,25 @@ def check_script_syntax(script_name):
 
 
 def check_env_variables():
-    """检查环境变量"""
-    required = ['DS_TOKEN', 'DB_PASSWORD']
+    """检查运行所需密钥是否已通过环境或本地配置提供。"""
+    required = {
+        'DS_TOKEN': DS_CONFIG.get('token'),
+        'DB_PASSWORD': DB_CONFIG.get('password'),
+    }
     missing = []
-    for var in required:
-        if not os.environ.get(var):
+    for var, configured_value in required.items():
+        value = os.environ.get(var) or configured_value
+        if not _is_real_secret_value(value):
             missing.append(var)
     return missing
+
+
+def _is_real_secret_value(value):
+    """Treat empty strings and template placeholders as missing secrets."""
+    if not value:
+        return False
+    normalized = str(value).strip()
+    return bool(normalized) and not normalized.startswith("REPLACE_WITH_")
 
 
 def check_csv_file():
