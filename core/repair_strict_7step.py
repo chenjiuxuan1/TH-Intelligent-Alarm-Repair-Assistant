@@ -2328,13 +2328,20 @@ def build_alert_difference_report_lines(task):
     """Build clear difference text for scalar and structured quality results."""
     src_value = task.get('src_value')
     dest_value = task.get('dest_value')
+    if is_zero_diff(task.get('diff')):
+        lines = [
+            "    结果内容差异: 总差异数为0，但告警仍存在，通常表示数组/分组明细结果不一致"
+        ]
+        if has_result_value_mismatch(src_value, dest_value):
+            lines.append(f"    源结果: {compact_result_preview(src_value)}")
+            lines.append(f"    目标结果: {compact_result_preview(dest_value)}")
+        return lines
+
     if has_result_value_mismatch(src_value, dest_value):
         lines = [
             "    结果内容差异: 两侧明细结果不一致"
         ]
-        if is_zero_diff(task.get('diff')):
-            lines[0] += "（diff=0 表示总差异数为0，不代表数组/分组明细一致）"
-        elif task.get('diff') not in (None, ''):
+        if task.get('diff') not in (None, ''):
             lines.append(f"    数据量差异: {task['diff']}")
         lines.append(f"    源结果: {compact_result_preview(src_value)}")
         lines.append(f"    目标结果: {compact_result_preview(dest_value)}")

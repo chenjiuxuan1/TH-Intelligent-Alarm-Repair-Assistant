@@ -2200,9 +2200,38 @@ class RepairStrict7StepTests(unittest.TestCase):
             report = module.generate_tv_report(summary, [])
 
         self.assertIn("结果内容差异", report)
-        self.assertIn("diff=0", report)
+        self.assertIn("总差异数为0", report)
+        self.assertIn("数组/分组明细", report)
         self.assertIn("源结果:", report)
         self.assertIn("目标结果:", report)
+        self.assertNotIn("数据量差异: 0", report)
+
+    def test_generate_tv_report_does_not_describe_zero_diff_as_quantity_difference(self):
+        module = load_module()
+        summary = {
+            "initial_alert_count": 1,
+            "resolved_count": 0,
+            "remaining_count": 1,
+            "manual_review_count": 1,
+            "rerun_tasks": [],
+            "resolved_tasks": [],
+            "remaining_tasks": [
+                {
+                    "table": "dws_user_performance_first_loan_info",
+                    "dt": "2026-05-19",
+                    "diff": 0,
+                    "error": "复验完成后告警仍存在，需人工处理",
+                }
+            ],
+            "post_fuyan_remaining_tables": {"dws_user_performance_first_loan_info"},
+            "display_pending_tables_count": 1,
+        }
+
+        with mock.patch.object(module, "log"):
+            report = module.generate_tv_report(summary, [])
+
+        self.assertIn("总差异数为0", report)
+        self.assertIn("数组/分组明细", report)
         self.assertNotIn("数据量差异: 0", report)
 
     def test_evaluate_repair_outcome_queries_remaining_tables_after_fuyan_wait(self):
