@@ -2201,7 +2201,7 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertIn("结果内容差异", report)
         self.assertIn("总差异数为0", report)
-        self.assertIn("数组/分组明细", report)
+        self.assertIn("其他明细数据或者数组差异", report)
         self.assertIn("源结果:", report)
         self.assertIn("目标结果:", report)
         self.assertNotIn("数据量差异: 0", report)
@@ -2231,7 +2231,7 @@ class RepairStrict7StepTests(unittest.TestCase):
             report = module.generate_tv_report(summary, [])
 
         self.assertIn("总差异数为0", report)
-        self.assertIn("数组/分组明细", report)
+        self.assertIn("其他明细数据或者数组差异", report)
         self.assertNotIn("数据量差异: 0", report)
 
     def test_evaluate_repair_outcome_queries_remaining_tables_after_fuyan_wait(self):

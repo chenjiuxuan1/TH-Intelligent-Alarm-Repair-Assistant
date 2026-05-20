@@ -2330,7 +2330,7 @@ def build_alert_difference_report_lines(task):
     dest_value = task.get('dest_value')
     if is_zero_diff(task.get('diff')):
         lines = [
-            "    结果内容差异: 总差异数为0，但告警仍存在，通常表示数组/分组明细结果不一致"
+            "    结果内容差异: 总差异数为0，但告警仍存在，其他明细数据或者数组差异"
         ]
         if has_result_value_mismatch(src_value, dest_value):
             lines.append(f"    源结果: {compact_result_preview(src_value)}")
