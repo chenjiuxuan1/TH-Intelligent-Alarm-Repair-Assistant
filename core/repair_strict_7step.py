@@ -1061,7 +1061,7 @@ def step1_scan_alerts(now=None):
         conn = get_db_connection()
         with conn.cursor() as cursor:
             sql = """
-                SELECT id, name, src_db, src_tbl, dest_db, dest_tbl, `begin`, `end`, diff
+                SELECT id, name, src_db, src_tbl, dest_db, dest_tbl, `begin`, `end`, src_value, dest_value, diff
                 FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
                 ORDER BY created_at DESC
@@ -1084,6 +1084,8 @@ def step1_scan_alerts(now=None):
                     'search_tables': build_search_tables(row),
                     'dt': dt,
                     'name': row.get('name', ''),
+                    'src_value': row.get('src_value', ''),
+                    'dest_value': row.get('dest_value', ''),
                     'diff': row.get('diff', '')
                 }
                 if window_status['is_out_of_window']:
@@ -2293,8 +2295,7 @@ def generate_tv_report(summary, fuyan_results):
         for task in summary['remaining_tasks']:
             report_lines.append(f"  • {task['table']}")
             report_lines.append(f"    原因: {task.get('error', '复验完成后告警仍存在，需人工处理')}")
-            if task.get('diff') not in (None, ''):
-                report_lines.append(f"    数据量差异: {task['diff']}")
+            report_lines.extend(build_alert_difference_report_lines(task))
         report_lines.append("")
     
     report_lines.append("🔄 【复验工作流状态】")
@@ -2321,6 +2322,49 @@ def generate_tv_report(summary, fuyan_results):
     report_lines.append("📌 智能告警修复系统自动生成")
     
     return "\n".join(report_lines)
+
+
+def build_alert_difference_report_lines(task):
+    """Build clear difference text for scalar and structured quality results."""
+    src_value = task.get('src_value')
+    dest_value = task.get('dest_value')
+    if has_result_value_mismatch(src_value, dest_value):
+        lines = [
+            "    结果内容差异: 两侧明细结果不一致"
+        ]
+        if is_zero_diff(task.get('diff')):
+            lines[0] += "（diff=0 表示总差异数为0，不代表数组/分组明细一致）"
+        elif task.get('diff') not in (None, ''):
+            lines.append(f"    数据量差异: {task['diff']}")
+        lines.append(f"    源结果: {compact_result_preview(src_value)}")
+        lines.append(f"    目标结果: {compact_result_preview(dest_value)}")
+        return lines
+
+    if task.get('diff') not in (None, ''):
+        return [f"    数据量差异: {task['diff']}"]
+    return []
+
+
+def has_result_value_mismatch(src_value, dest_value):
+    if src_value in (None, '') or dest_value in (None, ''):
+        return False
+    return str(src_value).strip() != str(dest_value).strip()
+
+
+def is_zero_diff(diff):
+    if diff in (None, ''):
+        return False
+    try:
+        return float(diff) == 0
+    except (TypeError, ValueError):
+        return str(diff).strip() == "0"
+
+
+def compact_result_preview(value, limit=220):
+    text = str(value).replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
 
 
 def send_tv_report_to_dingtalk(report_content):

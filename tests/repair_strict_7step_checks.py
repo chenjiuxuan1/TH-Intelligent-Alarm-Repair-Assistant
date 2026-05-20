@@ -2173,6 +2173,38 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertIn("数据量差异: 456", report)
 
+    def test_generate_tv_report_describes_structured_result_mismatch_when_diff_is_zero(self):
+        module = load_module()
+        summary = {
+            "initial_alert_count": 1,
+            "resolved_count": 0,
+            "remaining_count": 1,
+            "manual_review_count": 1,
+            "rerun_tasks": [],
+            "resolved_tasks": [],
+            "remaining_tasks": [
+                {
+                    "table": "dws_user_performance_first_loan_info",
+                    "dt": "2026-05-19",
+                    "diff": 0,
+                    "src_value": '[{"application_segment":"seg1","segment_cnt":2414}]',
+                    "dest_value": '[{"application_segment":"01.A","segment_cnt":6020}]',
+                    "error": "复验完成后告警仍存在，需人工处理",
+                }
+            ],
+            "post_fuyan_remaining_tables": {"dws_user_performance_first_loan_info"},
+            "display_pending_tables_count": 1,
+        }
+
+        with mock.patch.object(module, "log"):
+            report = module.generate_tv_report(summary, [])
+
+        self.assertIn("结果内容差异", report)
+        self.assertIn("diff=0", report)
+        self.assertIn("源结果:", report)
+        self.assertIn("目标结果:", report)
+        self.assertNotIn("数据量差异: 0", report)
+
     def test_evaluate_repair_outcome_queries_remaining_tables_after_fuyan_wait(self):
         module = load_module()
         completed_tasks = [{"table": "dwd_fox_call_history", "dt": "2026-04-21"}]
