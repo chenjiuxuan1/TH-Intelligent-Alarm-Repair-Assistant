@@ -63,6 +63,9 @@ REPAIR_TASK_POLL_INTERVAL_SECONDS = int(os.environ.get('REPAIR_TASK_POLL_INTERVA
 REPAIR_TASK_MAX_WAIT_SECONDS = int(os.environ.get('REPAIR_TASK_MAX_WAIT_SECONDS', '1800'))
 REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS = int(os.environ.get('REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS', '1800'))
 DS_API_RETRY_COUNT = int(os.environ.get('DS_API_RETRY_COUNT', '2'))
+DS_API_GET_TIMEOUT_SECONDS = int(os.environ.get('DS_API_GET_TIMEOUT_SECONDS', '5'))
+DS_API_POST_TIMEOUT_SECONDS = int(os.environ.get('DS_API_POST_TIMEOUT_SECONDS', '30'))
+DS_STEP2_PROGRESS_EVERY = int(os.environ.get('DS_STEP2_PROGRESS_EVERY', '10'))
 DS_PROJECT_SEARCH_KEYWORDS = [
     item.strip()
     for item in os.environ.get('DS_PROJECT_SEARCH_KEYWORDS', '泰国,TH,THA,tha').split(',')
@@ -528,6 +531,7 @@ def get_search_project_codes():
         project_name = get_project_name(project)
         if any(keyword.lower() in project_name.lower() for keyword in DS_PROJECT_SEARCH_KEYWORDS):
             add(project_code)
+    debug_log(f"候选项目列表: {codes}")
     return codes
 
 
@@ -1155,7 +1159,7 @@ def ds_api_get(endpoint):
     last_error = ''
     for attempt in range(max(1, DS_API_RETRY_COUNT)):
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
+            with urllib.request.urlopen(req, timeout=DS_API_GET_TIMEOUT_SECONDS) as response:
                 result = parse_ds_json_response(response, endpoint)
                 return result.get('code') == 0, result.get('data', {}), result.get('msg', '')
         except urllib.error.HTTPError as e:
@@ -1181,7 +1185,7 @@ def ds_api_post(endpoint, data):
     last_error = ''
     for attempt in range(max(1, DS_API_RETRY_COUNT)):
         try:
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=DS_API_POST_TIMEOUT_SECONDS) as response:
                 result = parse_ds_json_response(response, endpoint)
                 return result.get('code') == 0, result, result.get('msg', '')
         except urllib.error.HTTPError as e:
@@ -1701,7 +1705,9 @@ def step2_find_locations(alerts):
                 search_workflows = workflow_cache_by_project.get(project_code) or []
 
                 # 在缓存的工作流中搜索
-                for wf in search_workflows:
+                for index, wf in enumerate(search_workflows, 1):
+                    if DS_STEP2_PROGRESS_EVERY > 0 and index % DS_STEP2_PROGRESS_EVERY == 0:
+                        log(f"  项目 {project_code} 正在扫描工作流 {index}/{len(search_workflows)}...")
                     wf_code = (
                         wf.get('code')
                         or wf.get('workflowDefinitionCode')
