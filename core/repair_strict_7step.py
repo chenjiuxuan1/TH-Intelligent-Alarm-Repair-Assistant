@@ -301,6 +301,16 @@ def extract_task_definition_list(detail):
     if not isinstance(detail, dict):
         return []
 
+    def looks_like_task_list(value):
+        if not isinstance(value, list) or not value:
+            return False
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            if item.get('name') and (item.get('code') or item.get('taskType') or item.get('taskParams')):
+                return True
+        return False
+
     for key in (
         'taskDefinitionList',
         'taskDefinitionLogList',
@@ -323,6 +333,14 @@ def extract_task_definition_list(detail):
             nested_tasks = extract_task_definition_list(nested)
             if nested_tasks:
                 return nested_tasks
+
+    for value in detail.values():
+        if looks_like_task_list(value):
+            return value
+        if isinstance(value, dict):
+            nested_tasks = extract_task_definition_list(value)
+            if nested_tasks:
+                return nested_tasks
     return []
 
 
@@ -331,9 +349,11 @@ def get_task_definition_list_for_workflow(workflow_code, project_code=None):
     project_code = project_code or PROJECT_CODE
     endpoints = [
         f"/projects/{project_code}/process-definition/{workflow_code}/tasks",
+        f"/projects/{project_code}/process-definition/batch-query-tasks?codes={workflow_code}",
         f"/projects/{project_code}/process-definition/query-task-definition-list?processDefinitionCode={workflow_code}",
         f"/projects/{project_code}/process-definition/{workflow_code}/view-tree?limit=10000",
         f"/projects/{project_code}/workflow-definition/{workflow_code}/tasks",
+        f"/projects/{project_code}/workflow-definition/batch-query-tasks?codes={workflow_code}",
         f"/projects/{project_code}/workflow-definition/query-task-definition-list?processDefinitionCode={workflow_code}",
         f"/projects/{project_code}/workflow-definition/{workflow_code}/view-tree?limit=10000",
     ]

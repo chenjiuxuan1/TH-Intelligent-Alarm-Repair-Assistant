@@ -366,6 +366,31 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(result["task_code"], "task-34")
         self.assertIn("/projects/default-project/process-definition/wf-34/tasks", seen_endpoints)
 
+    def test_step2_search_in_workflow_loads_tasks_from_ds34_batch_query_tasks_map(self):
+        module = load_module()
+        seen_endpoints = []
+
+        def fake_ds_api_get(endpoint):
+            seen_endpoints.append(endpoint)
+            if endpoint == "/projects/default-project/workflow-definition/wf-34":
+                return False, {}, "not json"
+            if endpoint == "/projects/default-project/process-definition/wf-34":
+                return True, {"processDefinition": {"name": "DWS（1D）"}}, ""
+            if endpoint == "/projects/default-project/process-definition/batch-query-tasks?codes=wf-34":
+                return True, {
+                    "wf-34": [
+                        {"code": "task-34", "name": "dws_user_performance_first_loan_info"}
+                    ]
+                }, ""
+            return False, {}, endpoint
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            result = module.step2_search_in_workflow("wf-34", "dws_user_performance_first_loan_info")
+
+        self.assertEqual(result["workflow_name"], "DWS（1D）")
+        self.assertEqual(result["task_code"], "task-34")
+        self.assertIn("/projects/default-project/process-definition/batch-query-tasks?codes=wf-34", seen_endpoints)
+
     def test_step2_search_in_workflow_does_not_match_sql_only_reference_from_other_task(self):
         module = load_module()
         detail = {
