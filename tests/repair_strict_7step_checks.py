@@ -1506,6 +1506,46 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["task_code"], "task-child")
         self.assertEqual(tasks[0]["task_name"], "dwd_fox_chatbot_dialog")
 
+    def test_step2_find_locations_descends_into_subprocess_even_when_parent_name_differs(self):
+        module = load_module()
+        module.PRIORITY_WORKFLOWS = [('wf-parent', '泰国-数仓工作流（1D）')]
+        alerts = [{"id": 1, "table": "dws_user_performance_first_loan_info", "dt": "2026-05-22", "diff": 64}]
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition/wf-parent"):
+                return True, {
+                    "processDefinition": {"name": "泰国-数仓工作流（1D）"},
+                    "taskDefinitionList": [
+                        {
+                            "code": "task-parent-subprocess",
+                            "name": "DWS（1D）",
+                            "taskType": "SUB_PROCESS",
+                            "taskParams": {"processDefinitionCode": "wf-dws-child"},
+                        }
+                    ],
+                }, ""
+            if endpoint.endswith("/workflow-definition/wf-dws-child"):
+                return True, {
+                    "processDefinition": {"name": "DWS（1D）"},
+                    "taskDefinitionList": [
+                        {
+                            "code": "task-child",
+                            "name": "dws_user_performance_first_loan_info",
+                            "taskType": "SHELL",
+                        }
+                    ],
+                }, ""
+            if endpoint.endswith("/schedules?pageNo=1&pageSize=200"):
+                return True, {"totalList": [], "totalPage": 1}, ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(tasks[0]["workflow_code"], "wf-dws-child")
+        self.assertEqual(tasks[0]["workflow_name"], "DWS（1D）")
+        self.assertEqual(tasks[0]["task_code"], "task-child")
+
     def test_step2_find_locations_allows_scheduled_workflow_when_matching_real_task(self):
         module = load_module()
         module.PRIORITY_WORKFLOWS = []

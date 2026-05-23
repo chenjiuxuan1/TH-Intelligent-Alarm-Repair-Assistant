@@ -1552,21 +1552,23 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None, project_co
         
         # 匹配任务名
         task_params = normalize_task_params(task)
+        task_type = (task.get('taskType') or '').upper()
+
+        if is_subprocess_task(task_type):
+            child_workflow_code = extract_subprocess_workflow_code(task, task_params)
+            if child_workflow_code and child_workflow_code != workflow_code:
+                child_result = step2_search_in_workflow(
+                    child_workflow_code,
+                    table_name,
+                    visited=visited,
+                    project_code=project_code,
+                )
+                if child_result:
+                    child_candidates.append(child_result)
+                    continue
 
         if is_task_name_match(task_name, table_name):
             candidate = build_candidate(task, task_name)
-            if is_subprocess_task(candidate.get('task_type')):
-                child_workflow_code = extract_subprocess_workflow_code(task, task_params)
-                if child_workflow_code and child_workflow_code != workflow_code:
-                    child_result = step2_search_in_workflow(
-                        child_workflow_code,
-                        table_name,
-                        visited=visited,
-                        project_code=project_code,
-                    )
-                    if child_result:
-                        child_candidates.append(child_result)
-                        continue
             candidates.append(candidate)
             continue
         
