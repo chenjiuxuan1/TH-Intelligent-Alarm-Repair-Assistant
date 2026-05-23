@@ -477,6 +477,40 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["project_code"], "th-project")
         self.assertEqual(running_instances[0]["project_code"], "th-project")
 
+    def test_step3_start_repair_falls_back_to_indonesia_start_process_exec_type(self):
+        module = load_module()
+        module.DS_API_MODE = "process_v2"
+        tasks = [
+            {
+                "table": "dws_user_performance_first_loan_info",
+                "dt": "2026-05-22",
+                "workflow_code": "wf-th",
+                "workflow_name": "DWS（1D）",
+                "task_code": "task-th",
+                "task_name": "dws_user_performance_first_loan_info",
+            }
+        ]
+        attempts = []
+
+        def fake_ds_api_post(endpoint, data):
+            attempts.append((endpoint, dict(data)))
+            if data.get("execType") == "START_CURRENT_TASK_PROCESS":
+                return False, {}, "unsupported execType"
+            return True, {"data": [12345]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
+            mock.patch.object(module, "find_conflicting_running_instance", return_value=None), \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0][1]["execType"], "START_CURRENT_TASK_PROCESS")
+        self.assertEqual(attempts[1][1]["execType"], "START_PROCESS")
+        self.assertEqual(attempts[1][1]["startNodeList"], "task-th")
+        self.assertEqual(results[0]["instance_id"], 12345)
+        self.assertEqual(running_instances[0]["instance_id"], 12345)
+
     def test_step3_start_repair_falls_back_to_workflow_style_start_when_process_style_fails(self):
         module = load_module()
         tasks = [

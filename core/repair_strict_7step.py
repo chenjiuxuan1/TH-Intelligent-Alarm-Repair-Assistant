@@ -66,6 +66,10 @@ DS_API_RETRY_COUNT = int(os.environ.get('DS_API_RETRY_COUNT', '2'))
 DS_API_GET_TIMEOUT_SECONDS = int(os.environ.get('DS_API_GET_TIMEOUT_SECONDS', '5'))
 DS_API_POST_TIMEOUT_SECONDS = int(os.environ.get('DS_API_POST_TIMEOUT_SECONDS', '30'))
 DS_STEP2_PROGRESS_EVERY = int(os.environ.get('DS_STEP2_PROGRESS_EVERY', '10'))
+DS_ALLOW_START_PROCESS_FALLBACK = os.environ.get(
+    'DS_ALLOW_START_PROCESS_FALLBACK',
+    '1',
+).strip().lower() in {'1', 'true', 'yes', 'on'}
 DS_PROJECT_SEARCH_KEYWORDS = [
     item.strip()
     for item in os.environ.get('DS_PROJECT_SEARCH_KEYWORDS', '泰国,TH,THA,tha').split(',')
@@ -218,6 +222,16 @@ def sql_targets_table(sql_text, table_name):
 def start_workflow_instance_with_fallbacks(project_code, workflow_code, base_data, dt=None, table=''):
     start_attempts = _get_start_attempts()
     start_params_payloads = build_start_params_payloads(dt) if dt else [None]
+    base_payloads = [dict(base_data)]
+    if (
+        DS_ALLOW_START_PROCESS_FALLBACK
+        and base_data.get('startNodeList')
+        and base_data.get('execType') != 'START_PROCESS'
+    ):
+        fallback_data = dict(base_data)
+        fallback_data['execType'] = 'START_PROCESS'
+        base_payloads.append(fallback_data)
+
     success = False
     result = {}
     msg = ''
@@ -225,39 +239,41 @@ def start_workflow_instance_with_fallbacks(project_code, workflow_code, base_dat
     used_payload = {}
     launched_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    for start_endpoint, code_field in start_attempts:
-        for index, start_params_payload in enumerate(start_params_payloads):
-            attempt_data = dict(base_data)
-            if start_params_payload is not None:
-                attempt_data['startParams'] = start_params_payload
-            attempt_data[code_field] = workflow_code
-            attempt_data['scheduleTime'] = launched_at if start_endpoint == 'start-workflow-instance' else ''
-            used_endpoint = f"/projects/{project_code}/executors/{start_endpoint}"
-            used_payload = attempt_data
-            debug_log(
-                f"尝试启动 table={table or workflow_code} endpoint={used_endpoint} "
-                f"code_field={code_field} start_params_index={index}"
-            )
-            success, result, msg = ds_api_post(used_endpoint, attempt_data)
-            if success:
-                extracted_instance_id = _extract_instance_id_from_start_result(result)
-                if extracted_instance_id not in (None, ''):
-                    return True, result, msg, used_endpoint, used_payload, launched_at
+    for base_payload in base_payloads:
+        for start_endpoint, code_field in start_attempts:
+            for index, start_params_payload in enumerate(start_params_payloads):
+                attempt_data = dict(base_payload)
+                if start_params_payload is not None:
+                    attempt_data['startParams'] = start_params_payload
+                attempt_data[code_field] = workflow_code
+                attempt_data['scheduleTime'] = launched_at if start_endpoint == 'start-workflow-instance' else ''
+                used_endpoint = f"/projects/{project_code}/executors/{start_endpoint}"
+                used_payload = attempt_data
                 debug_log(
-                    f"启动接口返回成功但无实例ID table={table or workflow_code} "
-                    f"endpoint={used_endpoint} raw_data={result.get('data')!r}"
+                    f"尝试启动 table={table or workflow_code} endpoint={used_endpoint} "
+                    f"code_field={code_field} execType={attempt_data.get('execType')} "
+                    f"start_params_index={index}"
                 )
-                success = False
-                result = {}
-                msg = '启动接口返回成功但未提供实例ID'
-            else:
-                debug_log(
-                    f"启动失败 table={table or workflow_code} endpoint={used_endpoint} "
-                    f"msg={msg or result.get('msg', '')}"
-                )
-                if start_params_payload is not None and index == 0 and should_retry_with_property_list_start_params(msg):
-                    continue
-            break
+                success, result, msg = ds_api_post(used_endpoint, attempt_data)
+                if success:
+                    extracted_instance_id = _extract_instance_id_from_start_result(result)
+                    if extracted_instance_id not in (None, ''):
+                        return True, result, msg, used_endpoint, used_payload, launched_at
+                    debug_log(
+                        f"启动接口返回成功但无实例ID table={table or workflow_code} "
+                        f"endpoint={used_endpoint} raw_data={result.get('data')!r}"
+                    )
+                    success = False
+                    result = {}
+                    msg = '启动接口返回成功但未提供实例ID'
+                else:
+                    debug_log(
+                        f"启动失败 table={table or workflow_code} endpoint={used_endpoint} "
+                        f"execType={attempt_data.get('execType')} msg={msg or result.get('msg', '')}"
+                    )
+                    if start_params_payload is not None and index == 0 and should_retry_with_property_list_start_params(msg):
+                        continue
+                break
 
     return success, result, msg, used_endpoint, used_payload, launched_at
 
@@ -1989,6 +2005,8 @@ def step3_start_repair(tasks):
                 f"raw_data={result.get('data')}"
             )
             log(f"  ✅ 启动成功，实例ID: {instance_id}")
+            if used_payload.get('execType') != base_data.get('execType'):
+                log(f"  ℹ️ 已按印尼兼容方式兜底启动: execType={used_payload.get('execType')}")
             task['status'] = 'success'
             task['project_code'] = project_code
             task['start_response_id'] = instance_id
