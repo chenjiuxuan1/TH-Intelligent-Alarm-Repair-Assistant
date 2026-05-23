@@ -444,6 +444,39 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["instance_id"], 12345)
         self.assertEqual(running_instances[0]["instance_id"], 12345)
 
+    def test_step3_start_repair_uses_task_project_code_when_present(self):
+        module = load_module()
+        tasks = [
+            {
+                "project_code": "th-project",
+                "table": "dws_user_performance_first_loan_info",
+                "dt": "2026-05-22",
+                "workflow_code": "wf-th",
+                "workflow_name": "DWS（1D）",
+                "task_code": "task-th",
+                "task_name": "dws_user_performance_first_loan_info",
+            }
+        ]
+        captured = {}
+
+        def fake_ds_api_post(endpoint, data):
+            captured["endpoint"] = endpoint
+            captured["data"] = data
+            return True, {"data": [12345]}, ""
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post), \
+            mock.patch.object(module, "find_conflicting_running_instance", return_value=None) as mocked_conflict, \
+            mock.patch.object(module, "log"), \
+            mock.patch("time.sleep"):
+            results, running_instances = module.step3_start_repair(tasks)
+
+        mocked_conflict.assert_called_once_with("th-project", "wf-th")
+        self.assertEqual(captured["endpoint"], "/projects/th-project/executors/start-process-instance")
+        self.assertEqual(captured["data"]["processDefinitionCode"], "wf-th")
+        self.assertEqual(captured["data"]["startNodeList"], "task-th")
+        self.assertEqual(results[0]["project_code"], "th-project")
+        self.assertEqual(running_instances[0]["project_code"], "th-project")
+
     def test_step3_start_repair_falls_back_to_workflow_style_start_when_process_style_fails(self):
         module = load_module()
         tasks = [
@@ -803,6 +836,40 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0]["final_status"], "success")
         self.assertEqual(completed[0]["end_time"], "2026-05-10 09:00:00")
+        self.assertEqual(failed, [])
+
+    def test_step4_wait_and_check_uses_running_instance_project_code(self):
+        module = load_module()
+        running_instances = [
+            {
+                "table": "dws_user_performance_first_loan_info",
+                "instance_id": 12345,
+                "project_code": "th-project",
+                "workflow_code": "wf-th",
+                "task": {
+                    "table": "dws_user_performance_first_loan_info",
+                    "instance_id": 12345,
+                    "project_code": "th-project",
+                    "workflow_code": "wf-th",
+                },
+            }
+        ]
+        seen_projects = []
+
+        def fake_get_instance_detail(project_code, instance_id):
+            seen_projects.append(project_code)
+            return True, {"id": instance_id, "state": "SUCCESS"}, ""
+
+        with mock.patch.object(module, "get_instance_detail", side_effect=fake_get_instance_detail), \
+            mock.patch.object(module, "log"):
+            completed, failed = module.step4_wait_and_check(
+                running_instances,
+                poll_interval=1,
+                max_wait=1,
+            )
+
+        self.assertEqual(seen_projects, ["th-project"])
+        self.assertEqual(len(completed), 1)
         self.assertEqual(failed, [])
 
     def test_step4_wait_and_check_can_match_recent_instance_when_returned_id_is_not_queryable(self):
@@ -1189,15 +1256,16 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         list_calls = []
 
-        def fake_get_workflow_definition_list():
+        def fake_get_workflow_definition_list(*args, **kwargs):
             list_calls.append(1)
             if len(list_calls) == 1:
                 return False, {}, "empty response from workflow list"
             return True, {"totalList": [{"code": "wf-second"}]}, ""
 
-        def fake_step2_search_in_workflow(workflow_code, table_name):
+        def fake_step2_search_in_workflow(workflow_code, table_name, **kwargs):
             if workflow_code == "wf-second" and table_name == "ads_second_table":
                 return {
+                    "project_code": kwargs.get("project_code") or "default-project",
                     "workflow_code": "wf-second",
                     "workflow_name": "SECOND",
                     "task_code": "task-second",
@@ -1214,6 +1282,53 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(tasks[0]["workflow_name"], "未找到")
         self.assertEqual(tasks[1]["workflow_code"], "wf-second")
         self.assertEqual(tasks[1]["task_code"], "task-second")
+
+    def test_step2_find_locations_searches_matching_thailand_projects(self):
+        module = load_module()
+        alerts = [{"id": 1, "table": "dws_user_performance_first_loan_info", "dt": "2026-05-22"}]
+        searched = []
+
+        def fake_get_workflow_definition_list(project_code=None, include_local_fallback=True):
+            searched.append((project_code, include_local_fallback))
+            if project_code == "default-project":
+                return True, {"totalList": [{"code": "wf-main"}]}, ""
+            if project_code == "th-project":
+                return True, {"totalList": [{"code": "wf-th"}]}, ""
+            return True, {"totalList": []}, ""
+
+        def fake_step2_search_in_workflow(workflow_code, table_name, **kwargs):
+            if workflow_code == "wf-th" and kwargs.get("project_code") == "th-project":
+                return {
+                    "project_code": "th-project",
+                    "workflow_code": "wf-th",
+                    "workflow_name": "DWS（1D）",
+                    "task_code": "task-th",
+                    "task_name": "dws_user_performance_first_loan_info",
+                }
+            return None
+
+        with mock.patch.object(
+            module,
+            "get_search_project_codes",
+            return_value=["default-project", "th-project"],
+        ), mock.patch.object(
+            module,
+            "get_workflow_definition_list",
+            side_effect=fake_get_workflow_definition_list,
+        ), mock.patch.object(
+            module,
+            "step2_search_in_workflow",
+            side_effect=fake_step2_search_in_workflow,
+        ), mock.patch.object(module, "log"):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(
+            searched,
+            [("default-project", True), ("th-project", False)],
+        )
+        self.assertEqual(tasks[0]["project_code"], "th-project")
+        self.assertEqual(tasks[0]["workflow_code"], "wf-th")
+        self.assertEqual(tasks[0]["task_code"], "task-th")
 
     def test_step2_find_locations_scans_multiple_workflow_pages(self):
         module = load_module()
@@ -2481,7 +2596,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         alerts = [{"id": 1, "table": "dwd_user_info", "dt": "2026-05-09", "diff": 1}]
         searched_codes = []
 
-        def fake_search(workflow_code, table_name):
+        def fake_search(workflow_code, table_name, **kwargs):
             searched_codes.append(workflow_code)
             return None
 
@@ -2498,7 +2613,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         alerts = [{"id": 1, "table": "dwd_fox_chatbot_dialog", "dt": "2026-05-11", "diff": 1}]
         searched_codes = []
 
-        def fake_search(workflow_code, table_name):
+        def fake_search(workflow_code, table_name, **kwargs):
             searched_codes.append(workflow_code)
             if workflow_code == "wf-dialog":
                 return {
@@ -2541,7 +2656,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         ]
         searched = []
 
-        def fake_search(workflow_code, table_name):
+        def fake_search(workflow_code, table_name, **kwargs):
             searched.append((workflow_code, table_name))
             if table_name == "dwd_fox_chatbot_dialog":
                 return {
@@ -2577,7 +2692,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         module.PRIORITY_WORKFLOWS = []
         alerts = [{"id": 1, "table": "dwb_asset_info", "dt": "2026-05-11", "diff": 1}]
 
-        def fake_search(workflow_code, table_name):
+        def fake_search(workflow_code, table_name, **kwargs):
             if workflow_code == "wf-blocked":
                 return {
                     "workflow_code": "wf-blocked",
@@ -2607,7 +2722,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         alerts = [{"id": 1, "table": "dwb_asset_info", "dt": "2026-05-11", "diff": 1}]
         searched_codes = []
 
-        def fake_search(workflow_code, table_name):
+        def fake_search(workflow_code, table_name, **kwargs):
             searched_codes.append(workflow_code)
             if workflow_code == "wf-blocked":
                 return {

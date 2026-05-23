@@ -62,6 +62,11 @@ REPAIR_TASK_POLL_INTERVAL_SECONDS = int(os.environ.get('REPAIR_TASK_POLL_INTERVA
 REPAIR_TASK_MAX_WAIT_SECONDS = int(os.environ.get('REPAIR_TASK_MAX_WAIT_SECONDS', '1800'))
 REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS = int(os.environ.get('REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS', '1800'))
 DS_API_RETRY_COUNT = int(os.environ.get('DS_API_RETRY_COUNT', '2'))
+DS_PROJECT_SEARCH_KEYWORDS = [
+    item.strip()
+    for item in os.environ.get('DS_PROJECT_SEARCH_KEYWORDS', '泰国,TH,THA,tha').split(',')
+    if item.strip()
+]
 
 # 维护任务关键词（排除）
 MAINTENANCE_KEYWORDS = ['补充', '删除', '清理', '修复', '历史', '冗余', '临时', 'test', 'copy', '手插入']
@@ -418,8 +423,9 @@ def merge_workflow_list_items(primary, extra):
     return merged
 
 
-def get_workflow_definition_list():
+def get_workflow_definition_list(project_code=None, include_local_fallback=True):
     """兼容 DS 3.4/3.3 workflow-definition 与 DS 3.2 process-definition 列表接口，并自动翻页"""
+    project_code = project_code or PROJECT_CODE
     endpoint_templates = _get_definition_list_endpoint_templates()
     last_msg = ""
     all_candidates = []
@@ -431,7 +437,7 @@ def get_workflow_definition_list():
         merged_total_list = []
 
         while page_no <= total_pages:
-            endpoint = endpoint_template.format(project_code=PROJECT_CODE, page_no=page_no)
+            endpoint = endpoint_template.format(project_code=project_code, page_no=page_no)
             success, data, msg = ds_api_get(endpoint)
             if not success:
                 last_msg = msg
@@ -459,15 +465,16 @@ def get_workflow_definition_list():
         "/projects/{project_code}/workflow-definition/query-process-definition-list",
     ]
     for endpoint_template in list_endpoint_templates:
-        endpoint = endpoint_template.format(project_code=PROJECT_CODE)
+        endpoint = endpoint_template.format(project_code=project_code)
         success, data, msg = ds_api_get(endpoint)
         if success:
             all_candidates = merge_workflow_list_items(all_candidates, extract_list_payload_items(data))
         else:
             last_msg = msg
 
-    fallback_workflows = load_workflow_list_from_schedule_export()
-    all_candidates = merge_workflow_list_items(all_candidates, fallback_workflows)
+    if include_local_fallback:
+        fallback_workflows = load_workflow_list_from_schedule_export()
+        all_candidates = merge_workflow_list_items(all_candidates, fallback_workflows)
 
     if all_candidates:
         debug_log(
@@ -476,6 +483,51 @@ def get_workflow_definition_list():
         return True, {'totalList': all_candidates}, ''
 
     return False, {}, last_msg
+
+
+def get_project_list():
+    """获取 DS 项目列表，用于升级后 projectCode 变化时兜底搜索。"""
+    projects = []
+    for page_no in range(1, 21):
+        success, data, msg = ds_api_get(f"/projects?pageNo={page_no}&pageSize=100")
+        if not success:
+            debug_log(f"获取项目列表失败 page={page_no}: {msg}")
+            break
+        current_items = extract_list_payload_items(data)
+        projects.extend(current_items)
+        total_pages = get_page_total_pages(data, 100, len(current_items))
+        if page_no >= total_pages or not current_items:
+            break
+    return projects
+
+
+def get_project_code(project):
+    return project.get('code') or project.get('projectCode') or project.get('id')
+
+
+def get_project_name(project):
+    return str(project.get('name') or project.get('projectName') or '').strip()
+
+
+def get_search_project_codes():
+    codes = []
+    seen = set()
+
+    def add(code):
+        if code in (None, ''):
+            return
+        code_text = str(code)
+        if code_text not in seen:
+            seen.add(code_text)
+            codes.append(code_text)
+
+    add(PROJECT_CODE)
+    for project in get_project_list():
+        project_code = get_project_code(project)
+        project_name = get_project_name(project)
+        if any(keyword.lower() in project_name.lower() for keyword in DS_PROJECT_SEARCH_KEYWORDS):
+            add(project_code)
+    return codes
 
 
 def load_workflow_list_from_schedule_export(path=None):
@@ -511,8 +563,9 @@ def load_workflow_list_from_schedule_export(path=None):
     return workflows
 
 
-def get_schedule_map():
+def get_schedule_map(project_code=None):
     """获取当前项目的调度配置映射，用于识别带定时的父工作流"""
+    project_code = project_code or PROJECT_CODE
     endpoint_templates = [
         "/projects/{project_code}/schedules?pageNo={page_no}&pageSize=200",
     ]
@@ -523,7 +576,7 @@ def get_schedule_map():
         total_pages = 1
 
         while page_no <= total_pages:
-            endpoint = endpoint_template.format(project_code=PROJECT_CODE, page_no=page_no)
+            endpoint = endpoint_template.format(project_code=project_code, page_no=page_no)
             success, data, msg = ds_api_get(endpoint)
             if not success:
                 break
@@ -1451,15 +1504,17 @@ def should_block_scheduled_workflow_match(location):
     return is_subprocess_task(location.get('task_type'))
 
 
-def step2_search_in_workflow(workflow_code, table_name, visited=None):
+def step2_search_in_workflow(workflow_code, table_name, visited=None, project_code=None):
     """在指定工作流中搜索表"""
     workflow_code = str(workflow_code)
+    project_code = project_code or PROJECT_CODE
     visited = set(visited or set())
-    if workflow_code in visited:
+    visit_key = (str(project_code), workflow_code)
+    if visit_key in visited:
         return None
-    visited.add(workflow_code)
+    visited.add(visit_key)
 
-    success, detail, msg = get_workflow_definition_detail(workflow_code)
+    success, detail, msg = get_workflow_definition_detail(workflow_code, project_code=project_code)
     if not success:
         return None
     
@@ -1471,6 +1526,7 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None):
 
     def build_candidate(task, task_name):
         return {
+            'project_code': project_code,
             'workflow_code': workflow_code,
             'workflow_name': workflow_name,
             'task_code': task.get('code'),
@@ -1496,7 +1552,12 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None):
             if is_subprocess_task(candidate.get('task_type')):
                 child_workflow_code = extract_subprocess_workflow_code(task, task_params)
                 if child_workflow_code and child_workflow_code != workflow_code:
-                    child_result = step2_search_in_workflow(child_workflow_code, table_name, visited=visited)
+                    child_result = step2_search_in_workflow(
+                        child_workflow_code,
+                        table_name,
+                        visited=visited,
+                        project_code=project_code,
+                    )
                     if child_result:
                         child_candidates.append(child_result)
                         continue
@@ -1539,9 +1600,36 @@ def step2_find_locations(alerts):
     # 优先搜索这些工作流（提高效率）
     priority_workflows = PRIORITY_WORKFLOWS
     
-    # 缓存所有工作流列表（只获取一次）
-    all_workflows = None
-    schedule_map = None
+    # 缓存工作流与调度列表，DS 3.4 升级后同一国家可能拆到多个项目。
+    workflow_cache_by_project = {}
+    schedule_map_by_project = {}
+    priority_codes = {str(code) for code, _name in priority_workflows}
+
+    def get_schedule_map_for_project(project_code):
+        project_code = str(project_code or PROJECT_CODE)
+        if project_code not in schedule_map_by_project:
+            schedule_map_by_project[project_code] = get_schedule_map(project_code)
+        return schedule_map_by_project[project_code]
+
+    def search_workflow(project_code, workflow_code, search_tables):
+        project_code = str(project_code or PROJECT_CODE)
+        for search_table in search_tables:
+            result = step2_search_in_workflow(
+                workflow_code,
+                search_table,
+                project_code=project_code,
+            )
+            if not result:
+                continue
+            if is_blocked_workflow_match(result):
+                return 'blocked', result
+            if (
+                is_workflow_scheduled(result['workflow_code'], get_schedule_map_for_project(project_code))
+                and should_block_scheduled_workflow_match(result)
+            ):
+                return 'scheduled', result
+            return 'found', result
+        return '', None
     
     tasks = []
     found_count = 0
@@ -1577,72 +1665,69 @@ def step2_find_locations(alerts):
         blocked_location = None
         # 先在优先工作流中搜索
         for wf_code, wf_name in priority_workflows:
-            for search_table in search_tables:
-                result = step2_search_in_workflow(wf_code, search_table)
-                if not result:
-                    continue
-                if is_blocked_workflow_match(result):
-                    if blocked_location is None:
-                        blocked_location = result
-                    continue
-                if schedule_map is None:
-                    schedule_map = get_schedule_map()
-                if (
-                    is_workflow_scheduled(result['workflow_code'], schedule_map)
-                    and should_block_scheduled_workflow_match(result)
-                ):
-                    scheduled_location = result
-                    continue
+            status, result = search_workflow(PROJECT_CODE, wf_code, search_tables)
+            if status == 'blocked':
+                if blocked_location is None:
+                    blocked_location = result
+                continue
+            if status == 'scheduled':
+                scheduled_location = result
+                continue
+            if status == 'found':
                 location = result
                 break
             if location:
                 break
         
-        # 如果没找到，再搜索所有工作流（使用缓存）
+        # 如果没找到，再搜索所有泰国相关项目的工作流（使用缓存）
         if not location:
-            search_workflows = []
-            if all_workflows is None:
-                log(f"  在优先工作流中未找到，获取所有工作流列表...")
-                success, data, msg = get_workflow_definition_list()
-                if success:
-                    all_workflows = data.get('totalList', [])
-                    log(f"  获取到 {len(all_workflows)} 个工作流")
-                else:
-                    log(f"  ❌ 获取工作流列表失败: {msg}")
-                    all_workflows = None
-            search_workflows = all_workflows or []
-            
-            # 在缓存的工作流中搜索
-            for wf in search_workflows:
-                wf_code = (
-                    wf.get('code')
-                    or wf.get('workflowDefinitionCode')
-                    or wf.get('processDefinitionCode')
-                    or wf.get('definitionCode')
-                )
-                # 跳过已在priority中搜索过的工作流
-                if wf_code not in [pw[0] for pw in priority_workflows]:
-                    for search_table in search_tables:
-                        result = step2_search_in_workflow(wf_code, search_table)
-                        if not result:
-                            continue
-                        if is_blocked_workflow_match(result):
-                            if blocked_location is None:
-                                blocked_location = result
-                            continue
-                        if schedule_map is None:
-                            schedule_map = get_schedule_map()
-                        if (
-                            is_workflow_scheduled(result['workflow_code'], schedule_map)
-                            and should_block_scheduled_workflow_match(result)
-                        ):
-                            if scheduled_location is None:
-                                scheduled_location = result
-                            continue
+            project_codes = get_search_project_codes()
+            for project_code in project_codes:
+                project_code = str(project_code)
+                if project_code not in workflow_cache_by_project:
+                    log(f"  在优先工作流中未找到，获取项目 {project_code} 的工作流列表...")
+                    success, data, msg = get_workflow_definition_list(
+                        project_code=project_code,
+                        include_local_fallback=(project_code == str(PROJECT_CODE)),
+                    )
+                    if success:
+                        workflow_cache_by_project[project_code] = data.get('totalList', [])
+                        log(f"  项目 {project_code} 获取到 {len(workflow_cache_by_project[project_code])} 个工作流")
+                    else:
+                        log(f"  ❌ 项目 {project_code} 获取工作流列表失败: {msg}")
+                        # 失败不写入缓存，下一张告警表继续重试，避免瞬时空响应导致整轮都找不到。
+                        continue
+                search_workflows = workflow_cache_by_project.get(project_code) or []
+
+                # 在缓存的工作流中搜索
+                for wf in search_workflows:
+                    wf_code = (
+                        wf.get('code')
+                        or wf.get('workflowDefinitionCode')
+                        or wf.get('processDefinitionCode')
+                        or wf.get('definitionCode')
+                    )
+                    if not wf_code:
+                        continue
+                    # 跳过已在priority中搜索过的当前主项目工作流
+                    if project_code == str(PROJECT_CODE) and str(wf_code) in priority_codes:
+                        continue
+                    status, result = search_workflow(project_code, wf_code, search_tables)
+                    if status == 'blocked':
+                        if blocked_location is None:
+                            blocked_location = result
+                        continue
+                    if status == 'scheduled':
+                        if scheduled_location is None:
+                            scheduled_location = result
+                        continue
+                    if status == 'found':
                         location = result
                         break
                     if location:
                         break
+                if location:
+                    break
         
         if location:
             task = {
@@ -1658,8 +1743,9 @@ def step2_find_locations(alerts):
                 'task_code': location['task_code'],
                 'task_name': location['task_name'],
                 'task_flag': location.get('task_flag', 'YES'),
+                'project_code': location.get('project_code') or PROJECT_CODE,
             }
-            log(f"  ✅ {location['workflow_name']} -> {location['task_name']}")
+            log(f"  ✅ [{task['project_code']}] {location['workflow_name']} -> {location['task_name']}")
             found_count += 1
         elif scheduled_location:
             error_msg = build_scheduled_parent_only_error(scheduled_location)
@@ -1676,6 +1762,7 @@ def step2_find_locations(alerts):
                 'task_code': '',
                 'task_name': scheduled_location.get('task_name', ''),
                 'task_flag': scheduled_location.get('task_flag', ''),
+                'project_code': scheduled_location.get('project_code') or PROJECT_CODE,
                 'error': error_msg,
             }
             log(f"  ⏭️ {error_msg}")
@@ -1694,6 +1781,7 @@ def step2_find_locations(alerts):
                 'task_code': '',
                 'task_name': blocked_location.get('task_name', ''),
                 'task_flag': blocked_location.get('task_flag', ''),
+                'project_code': blocked_location.get('project_code') or PROJECT_CODE,
                 'error': error_msg,
             }
             log(f"  ⏭️ {error_msg}")
@@ -1833,6 +1921,7 @@ def step3_start_repair(tasks):
         dt = task['dt']
         workflow_code = task.get('workflow_code')
         task_code = task.get('task_code')
+        project_code = str(task.get('project_code') or PROJECT_CODE)
 
         if task.get('status') == 'skipped_out_of_window':
             log(f"[{i}/{len(tasks)}] ⏭️ {table} - 超出自动修复窗口，转人工处理")
@@ -1848,13 +1937,14 @@ def step3_start_repair(tasks):
             continue
         
         log(f"\n[{i}/{len(tasks)}] {table}")
+        log(f"  项目: {project_code}")
         log(f"  工作流: {task['workflow_name']}")
         log(f"  任务: {task['task_name']}")
 
-        conflict_instance = find_conflicting_running_instance(PROJECT_CODE, workflow_code)
+        conflict_instance = find_conflicting_running_instance(project_code, workflow_code)
         if conflict_instance:
             wait_success, remaining_conflict = wait_for_workflow_conflict_clear(
-                PROJECT_CODE,
+                project_code,
                 workflow_code,
             )
             if not wait_success:
@@ -1878,7 +1968,7 @@ def step3_start_repair(tasks):
             'dryRun': 0,
         }
         success, result, msg, used_endpoint, used_payload, launched_at = start_workflow_instance_with_fallbacks(
-            PROJECT_CODE,
+            project_code,
             workflow_code,
             base_data,
             dt=dt,
@@ -1893,6 +1983,7 @@ def step3_start_repair(tasks):
             )
             log(f"  ✅ 启动成功，实例ID: {instance_id}")
             task['status'] = 'success'
+            task['project_code'] = project_code
             task['start_response_id'] = instance_id
             task['instance_id'] = instance_id
             task['launched_at'] = launched_at
@@ -1901,6 +1992,7 @@ def step3_start_repair(tasks):
                 'instance_id': instance_id,
                 'start_response_id': instance_id,
                 'resolved_instance_id': None,
+                'project_code': project_code,
                 'workflow_code': workflow_code,
                 'task': task
             })
@@ -1960,13 +2052,14 @@ def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
             table = item['table']
             instance_id = item.get('resolved_instance_id') or item['instance_id']
             workflow_code = item.get('workflow_code') or item['task'].get('workflow_code')
+            project_code = str(item.get('project_code') or item['task'].get('project_code') or PROJECT_CODE)
 
             # 对印尼这类 process-instances 风格集群，start-process-instance 返回值可能只是启动回执，
             # 需要先从实例列表里按工作流 code + 启动时间找到真实实例，再进入详情/状态轮询。
             discovered_instance = {}
             if not item.get('resolved_instance_id') and workflow_code:
                 discovered_instance = find_recent_instance_by_workflow(
-                    PROJECT_CODE,
+                    project_code,
                     workflow_code,
                     launched_at=item['task'].get('launched_at'),
                 )
@@ -1982,9 +2075,9 @@ def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
                     instance_id = resolved_instance_id
             
             # 查询实例状态
-            success, data, msg = get_instance_detail(PROJECT_CODE, instance_id)
+            success, data, msg = get_instance_detail(project_code, instance_id)
             if not success or not data:
-                fallback_data = get_instance_from_list(PROJECT_CODE, instance_id)
+                fallback_data = get_instance_from_list(project_code, instance_id)
                 if fallback_data:
                     success = True
                     data = fallback_data
@@ -1995,7 +2088,7 @@ def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
                     msg = ''
                 elif workflow_code:
                     recent_instance = find_recent_instance_by_workflow(
-                        PROJECT_CODE,
+                        project_code,
                         workflow_code,
                         launched_at=item['task'].get('launched_at'),
                     )
@@ -2009,7 +2102,7 @@ def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
                         msg = ''
             
             if success and data:
-                data = maybe_replace_with_recent_real_instance(PROJECT_CODE, item, data)
+                data = maybe_replace_with_recent_real_instance(project_code, item, data)
                 state = data.get('state', 'UNKNOWN')
                 if data.get('id') is not None:
                     item['instance_id'] = data.get('id')
@@ -2039,7 +2132,7 @@ def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
                 # 超过 60s 还无法拿到明确状态则直接判失败，避免流程长期卡住。
                 if instance_age >= max_wait:
                     diagnostics = collect_instance_query_diagnostics(
-                        PROJECT_CODE,
+                        project_code,
                         instance_id=item['instance_id'],
                         workflow_code=workflow_code,
                         launched_at=item['task'].get('launched_at'),
