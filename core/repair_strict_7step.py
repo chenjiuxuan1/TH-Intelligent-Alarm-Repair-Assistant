@@ -20,7 +20,9 @@ from config.config import DS_CONFIG, FUYAN_WORKFLOWS, REPAIR_CONFIG, TABLE_CONFI
 import json
 import os
 import re
+import csv
 import urllib.request
+import urllib.error
 import time
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
@@ -41,6 +43,7 @@ DS_DEFINITION_ENDPOINT_STYLE = DS_CONFIG.get('definition_endpoint_style', 'auto'
 DS_INSTANCE_ENDPOINT_STYLE = DS_CONFIG.get('instance_endpoint_style', 'auto')
 QUALITY_RESULT_TABLE = TABLE_CONFIG['quality_result_table']
 MANUAL_REVIEW_STATE_FILE = WORKSPACE_CONFIG['manual_review_state_file']
+SCHEDULE_EXPORT_CSV = WORKSPACE_CONFIG.get('schedule_export_csv')
 SCAN_LOOKBACK_DAYS = REPAIR_CONFIG['scan_lookback_days']
 PRIORITY_WORKFLOWS = REPAIR_CONFIG.get('priority_workflow_codes') or []
 BLOCKED_WORKFLOW_NAMES = {
@@ -57,6 +60,7 @@ DS_STATUS_DEBUG = os.environ.get('REPAIR_DEBUG_DS_STATUS', '').strip().lower() i
 REPAIR_TASK_POLL_INTERVAL_SECONDS = int(os.environ.get('REPAIR_TASK_POLL_INTERVAL_SECONDS', '30'))
 REPAIR_TASK_MAX_WAIT_SECONDS = int(os.environ.get('REPAIR_TASK_MAX_WAIT_SECONDS', '1800'))
 REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS = int(os.environ.get('REPAIR_WORKFLOW_CONFLICT_WAIT_SECONDS', '1800'))
+DS_API_RETRY_COUNT = int(os.environ.get('DS_API_RETRY_COUNT', '2'))
 
 # 维护任务关键词（排除）
 MAINTENANCE_KEYWORDS = ['补充', '删除', '清理', '修复', '历史', '冗余', '临时', 'test', 'copy', '手插入']
@@ -319,7 +323,47 @@ def get_workflow_definition_list():
         if merged_total_list:
             return True, {'totalList': merged_total_list}, ''
 
+    fallback_workflows = load_workflow_list_from_schedule_export()
+    if fallback_workflows:
+        debug_log(
+            f"DS工作流列表接口失败，使用本地调度导出兜底: {len(fallback_workflows)} 个，最近错误: {last_msg}"
+        )
+        return True, {'totalList': fallback_workflows}, ''
+
     return False, {}, last_msg
+
+
+def load_workflow_list_from_schedule_export(path=None):
+    """从本地 DolphinScheduler 调度导出 CSV 兜底读取工作流列表。"""
+    csv_path = path or SCHEDULE_EXPORT_CSV
+    if not csv_path or not os.path.exists(csv_path):
+        return []
+
+    workflows = []
+    with open(csv_path, 'r', encoding='utf-8-sig', newline='') as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            workflow_code = (
+                row.get('工作流Code')
+                or row.get('workflow_code')
+                or row.get('processDefinitionCode')
+                or row.get('code')
+                or ''
+            )
+            workflow_name = row.get('工作流名称') or row.get('workflow_name') or row.get('name') or ''
+            workflow_code = str(workflow_code).strip()
+            workflow_name = str(workflow_name).strip()
+            if not workflow_code:
+                continue
+            workflows.append({
+                'code': workflow_code,
+                'processDefinitionCode': workflow_code,
+                'workflowDefinitionCode': workflow_code,
+                'name': workflow_name,
+                'processDefinitionName': workflow_name,
+                'workflowDefinitionName': workflow_name,
+            })
+    return workflows
 
 
 def get_schedule_map():
@@ -786,6 +830,26 @@ def normalize_fuyan_level(workflow):
     return level
 
 
+def normalize_alert_monitor_level(alert):
+    """从质量告警记录中提取 1/2/3 级复验口径。"""
+    for key in ('monitor_level', 'alert_level', 'type', 'alert_type', 'level'):
+        raw_value = alert.get(key)
+        if raw_value in (None, ''):
+            continue
+        value = str(raw_value).strip().lower()
+        if value.startswith('p') and value[1:] in {'1', '2', '3'}:
+            return value[1:]
+        if value in {'1', '2', '3'}:
+            return value
+        if '1' in value:
+            return '1'
+        if '2' in value:
+            return '2'
+        if '3' in value:
+            return '3'
+    return ''
+
+
 def get_fuyan_start_node(workflow):
     start_node = workflow.get('start_node') or workflow.get('startNodeList') or ''
     if start_node:
@@ -818,10 +882,17 @@ def resolve_fuyan_start_node_code(workflow):
 
 
 def select_fuyan_workflows(alerts):
-    """智能选择复验工作流：dwb 仅走1级，其余走1级 + 每日全级别 + 3级"""
+    """智能选择复验工作流：优先按告警级别精确选择，缺失级别时保留历史兜底策略。"""
     selected_levels = set()
     has_dwb_alert = False
+    has_explicit_level = False
     for alert in alerts or []:
+        alert_level = normalize_alert_monitor_level(alert)
+        if alert_level in {'1', '2', '3'}:
+            has_explicit_level = True
+            selected_levels.add(alert_level)
+            continue
+
         table = (alert.get('table') or '').lower()
         if table.startswith('dwb_'):
             has_dwb_alert = True
@@ -840,7 +911,7 @@ def select_fuyan_workflows(alerts):
         workflow_name = get_fuyan_name(workflow)
         include = False
         if workflow_level == 'all':
-            include = (not has_dwb_alert) and workflow_name.startswith('每日复验全级别数据')
+            include = (not has_explicit_level) and (not has_dwb_alert) and workflow_name.startswith('每日复验全级别数据')
         elif workflow_level in selected_levels:
             include = True
 
@@ -855,18 +926,46 @@ def log(msg):
     print(f"[{ts}] {msg}", flush=True)
 
 
+def parse_ds_json_response(response, endpoint):
+    body = response.read().decode('utf-8', errors='replace').strip()
+    if not body:
+        raise ValueError(f"empty response from {endpoint}")
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        preview = body[:200].replace('\n', ' ')
+        raise ValueError(f"non-json response from {endpoint}: {preview}") from exc
+
+
+def read_http_error_message(error):
+    try:
+        body = error.read().decode('utf-8', errors='replace').strip()
+    except Exception:
+        body = ''
+    if body:
+        return f"HTTP Error {error.code}: {error.reason}; body: {body[:200].replace(chr(10), ' ')}"
+    return f"HTTP Error {error.code}: {error.reason}"
+
+
 def ds_api_get(endpoint):
     """DS API GET请求"""
     url = f"{DS_BASE}{endpoint}"
     req = urllib.request.Request(url)
     req.add_header('token', DS_TOKEN)
     req.add_header('Accept', 'application/json, text/plain, */*')
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            return result.get('code') == 0, result.get('data', {}), result.get('msg', '')
-    except Exception as e:
-        return False, {}, str(e)
+    last_error = ''
+    for attempt in range(max(1, DS_API_RETRY_COUNT)):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                result = parse_ds_json_response(response, endpoint)
+                return result.get('code') == 0, result.get('data', {}), result.get('msg', '')
+        except urllib.error.HTTPError as e:
+            return False, {}, read_http_error_message(e)
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max(1, DS_API_RETRY_COUNT) - 1:
+                time.sleep(1)
+    return False, {}, last_error
 
 
 def ds_api_post(endpoint, data):
@@ -880,12 +979,19 @@ def ds_api_post(endpoint, data):
     )
     req.add_header('token', DS_TOKEN)
     req.add_header('Accept', 'application/json, text/plain, */*')
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            return result.get('code') == 0, result, result.get('msg', '')
-    except Exception as e:
-        return False, {}, str(e)
+    last_error = ''
+    for attempt in range(max(1, DS_API_RETRY_COUNT)):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = parse_ds_json_response(response, endpoint)
+                return result.get('code') == 0, result, result.get('msg', '')
+        except urllib.error.HTTPError as e:
+            return False, {}, read_http_error_message(e)
+        except Exception as e:
+            last_error = str(e)
+            if attempt < max(1, DS_API_RETRY_COUNT) - 1:
+                time.sleep(1)
+    return False, {}, last_error
 
 
 def normalize_to_datetime(value):
@@ -1061,7 +1167,7 @@ def step1_scan_alerts(now=None):
         conn = get_db_connection()
         with conn.cursor() as cursor:
             sql = """
-                SELECT id, name, src_db, src_tbl, dest_db, dest_tbl, `begin`, `end`, src_value, dest_value, diff
+                SELECT id, name, `type`, src_db, src_tbl, dest_db, dest_tbl, `begin`, `end`, src_value, dest_value, diff
                 FROM {quality_result_table}
                 WHERE result = 1 AND is_repaired = 0
                 ORDER BY created_at DESC
@@ -1084,6 +1190,7 @@ def step1_scan_alerts(now=None):
                     'search_tables': build_search_tables(row),
                     'dt': dt,
                     'name': row.get('name', ''),
+                    'type': row.get('type', ''),
                     'src_value': row.get('src_value', ''),
                     'dest_value': row.get('dest_value', ''),
                     'diff': row.get('diff', '')
@@ -1348,6 +1455,7 @@ def step2_find_locations(alerts):
         
         # 如果没找到，再搜索所有工作流（使用缓存）
         if not location:
+            search_workflows = []
             if all_workflows is None:
                 log(f"  在优先工作流中未找到，获取所有工作流列表...")
                 success, data, msg = get_workflow_definition_list()
@@ -1356,10 +1464,11 @@ def step2_find_locations(alerts):
                     log(f"  获取到 {len(all_workflows)} 个工作流")
                 else:
                     log(f"  ❌ 获取工作流列表失败: {msg}")
-                    all_workflows = []
+                    all_workflows = None
+            search_workflows = all_workflows or []
             
             # 在缓存的工作流中搜索
-            for wf in all_workflows:
+            for wf in search_workflows:
                 wf_code = (
                     wf.get('code')
                     or wf.get('workflowDefinitionCode')
@@ -1618,7 +1727,7 @@ def step3_start_repair(tasks):
             'failureStrategy': 'CONTINUE',
             'warningType': 'NONE',
             'warningGroupId': 0,
-            'execType': 'START_PROCESS',
+            'execType': 'START_CURRENT_TASK_PROCESS',
             'environmentCode': DS_ENVIRONMENT_CODE,
             'tenantCode': DS_TENANT_CODE,
             'dryRun': 0,
@@ -1948,7 +2057,7 @@ def step5_execute_fuyan(completed_tasks, failed_tasks, alerts):
             'warningGroupId': 0,
             'processInstancePriority': 'MEDIUM',
             'workerGroup': 'default',
-            'execType': 'START_PROCESS',
+            'execType': 'START_CURRENT_TASK_PROCESS' if fuyan_start_node else 'START_PROCESS',
             'environmentCode': DS_ENVIRONMENT_CODE,
             'tenantCode': DS_TENANT_CODE,
             'runMode': 'RUN_MODE_SERIAL',

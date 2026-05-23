@@ -296,6 +296,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(captured["data"]["processDefinitionCode"], "wf-l1")
         self.assertEqual(captured["data"]["startNodeList"], "task-l1")
         self.assertEqual(captured["data"]["taskDependType"], "TASK_ONLY")
+        self.assertEqual(captured["data"]["execType"], "START_CURRENT_TASK_PROCESS")
         self.assertEqual([item["name"] for item in results], ["每小时复验1级表数据(D-1)"])
 
     def test_step5_execute_fuyan_falls_back_to_workflow_style_start_when_process_style_fails(self):
@@ -411,6 +412,7 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertNotIn("workflowDefinitionCode", captured["data"])
         self.assertEqual(captured["data"]["startNodeList"], "task-1")
         self.assertEqual(captured["data"]["taskDependType"], "TASK_ONLY")
+        self.assertEqual(captured["data"]["execType"], "START_CURRENT_TASK_PROCESS")
         self.assertEqual(captured["data"]["scheduleTime"], "")
         self.assertEqual(
             captured["data"]["startParams"],
@@ -1154,6 +1156,41 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(tasks[0]["workflow_code"], "wf-1")
         self.assertEqual(tasks[0]["task_code"], "task-1")
+
+    def test_step2_find_locations_retries_workflow_list_after_transient_failure(self):
+        module = load_module()
+        alerts = [
+            {"id": 1, "table": "dwd_first_table", "dt": "2026-05-22"},
+            {"id": 2, "table": "ads_second_table", "dt": "2026-05-22"},
+        ]
+
+        list_calls = []
+
+        def fake_get_workflow_definition_list():
+            list_calls.append(1)
+            if len(list_calls) == 1:
+                return False, {}, "empty response from workflow list"
+            return True, {"totalList": [{"code": "wf-second"}]}, ""
+
+        def fake_step2_search_in_workflow(workflow_code, table_name):
+            if workflow_code == "wf-second" and table_name == "ads_second_table":
+                return {
+                    "workflow_code": "wf-second",
+                    "workflow_name": "SECOND",
+                    "task_code": "task-second",
+                    "task_name": "ads_second_table",
+                }
+            return None
+
+        with mock.patch.object(module, "get_workflow_definition_list", side_effect=fake_get_workflow_definition_list), \
+            mock.patch.object(module, "step2_search_in_workflow", side_effect=fake_step2_search_in_workflow), \
+            mock.patch.object(module, "log"):
+            tasks = module.step2_find_locations(alerts)
+
+        self.assertEqual(len(list_calls), 2)
+        self.assertEqual(tasks[0]["workflow_name"], "未找到")
+        self.assertEqual(tasks[1]["workflow_code"], "wf-second")
+        self.assertEqual(tasks[1]["task_code"], "task-second")
 
     def test_step2_find_locations_scans_multiple_workflow_pages(self):
         module = load_module()
