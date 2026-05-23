@@ -1110,14 +1110,24 @@ def select_fuyan_workflows(alerts):
     selected_levels = set()
     has_dwb_alert = False
     has_explicit_level = False
+    needs_week_recheck = False
     for alert in alerts or []:
+        table = (alert.get('table') or '').lower()
+        is_dws_alert = table.startswith('dws_')
+
         alert_level = normalize_alert_monitor_level(alert)
         if alert_level in {'1', '2', '3'}:
             has_explicit_level = True
             selected_levels.add(alert_level)
+            if is_dws_alert:
+                selected_levels.add('3')
+                needs_week_recheck = True
             continue
 
-        table = (alert.get('table') or '').lower()
+        if is_dws_alert:
+            needs_week_recheck = True
+            selected_levels.add('3')
+
         if table.startswith('dwb_'):
             has_dwb_alert = True
             selected_levels.add('1')
@@ -1135,7 +1145,10 @@ def select_fuyan_workflows(alerts):
         workflow_name = get_fuyan_name(workflow)
         include = False
         if workflow_level == 'all':
-            include = (not has_explicit_level) and (not has_dwb_alert) and workflow_name.startswith('每日复验全级别数据')
+            include = (
+                (not has_explicit_level and not has_dwb_alert)
+                or needs_week_recheck
+            ) and workflow_name.startswith('每日复验全级别数据')
         elif workflow_level in selected_levels:
             include = True
 
@@ -1550,7 +1563,7 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None, project_co
     candidates = []
     child_candidates = []
 
-    def build_candidate(task, task_name):
+    def build_candidate(task, task_name, match_type):
         return {
             'project_code': project_code,
             'workflow_code': workflow_code,
@@ -1559,7 +1572,32 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None, project_co
             'task_name': task_name,
             'task_flag': task.get('flag', 'YES'),
             'task_type': (task.get('taskType') or '').upper(),
+            'match_type': match_type,
         }
+
+    def choose_best_candidate(candidate_list):
+        non_datax_exact = [
+            candidate for candidate in candidate_list
+            if candidate.get('task_type') != 'DATAX' and candidate.get('match_type') == 'name'
+        ]
+        if non_datax_exact:
+            return non_datax_exact[0]
+
+        exact = [
+            candidate for candidate in candidate_list
+            if candidate.get('match_type') == 'name'
+        ]
+        if exact:
+            return exact[0]
+
+        non_datax = [
+            candidate for candidate in candidate_list
+            if candidate.get('task_type') != 'DATAX'
+        ]
+        if non_datax:
+            return non_datax[0]
+
+        return candidate_list[0] if candidate_list else None
     
     for task in tasks:
         task_name = task.get('name', '')
@@ -1588,35 +1626,22 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None, project_co
                     continue
 
         if is_task_name_match(task_name, table_name):
-            candidate = build_candidate(task, task_name)
+            candidate = build_candidate(task, task_name, 'name')
             candidates.append(candidate)
             continue
         
         # 匹配SQL
         sql = task_params.get('sql', '')
         if sql_targets_table(sql, table_name):
-            candidates.append(build_candidate(task, task_name))
+            candidates.append(build_candidate(task, task_name, 'sql'))
     
     if child_candidates:
-        non_datax_child_candidates = [
-            candidate for candidate in child_candidates
-            if candidate.get('task_type') != 'DATAX'
-        ]
-        if non_datax_child_candidates:
-            return non_datax_child_candidates[0]
-        return child_candidates[0]
+        return choose_best_candidate(child_candidates)
 
     if not candidates:
         return None
 
-    non_datax_candidates = [
-        candidate for candidate in candidates
-        if candidate.get('task_type') != 'DATAX'
-    ]
-    if non_datax_candidates:
-        return non_datax_candidates[0]
-    
-    return candidates[0]
+    return choose_best_candidate(candidates)
 
 
 def step2_find_locations(alerts):

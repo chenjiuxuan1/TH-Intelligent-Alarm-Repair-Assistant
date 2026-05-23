@@ -216,6 +216,30 @@ class RepairStrict7StepTests(unittest.TestCase):
 
         self.assertEqual(started_codes, ["wf-daily", "wf-l1", "wf-l3"])
 
+    def test_step5_execute_fuyan_adds_week_and_level3_for_dws_even_with_explicit_level1(self):
+        module = load_module()
+        module.FUYAN_WORKFLOWS = [
+            {"workflow_name": "每小时复验1级表数据(D-1)", "workflow_code": "wf-l1", "level": "1级表"},
+            {"workflow_name": "两小时复验3级表数据(D-1)", "workflow_code": "wf-l3", "level": "3级表"},
+            {"workflow_name": "每日复验全级别数据(W-1)", "workflow_code": "wf-week", "level": "全级别"},
+        ]
+        started_codes = []
+
+        def fake_ds_api_post(endpoint, data):
+            started_codes.append(data["processDefinitionCode"])
+            return True, {"data": [len(started_codes)]}, ""
+
+        alerts = [{"table": "dws_user_performance_first_loan_info", "monitor_level": "1"}]
+
+        with mock.patch.object(module, "ds_api_post", side_effect=fake_ds_api_post):
+            module.step5_execute_fuyan(
+                [{"table": "dws_user_performance_first_loan_info"}],
+                [],
+                alerts,
+            )
+
+        self.assertEqual(started_codes, ["wf-l1", "wf-l3", "wf-week"])
+
     def test_step5_execute_fuyan_always_includes_level1_for_non_dwb_tables(self):
         module = load_module()
         module.FUYAN_WORKFLOWS = [
@@ -390,6 +414,35 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(result["workflow_name"], "DWS（1D）")
         self.assertEqual(result["task_code"], "task-34")
         self.assertIn("/projects/default-project/process-definition/batch-query-tasks?codes=wf-34", seen_endpoints)
+
+    def test_step2_search_in_workflow_prefers_exact_task_name_over_sql_reference(self):
+        module = load_module()
+        detail = {
+            "workflowDefinition": {"name": "DWS（1D）"},
+            "taskDefinitionList": [
+                {
+                    "code": "task-dwd",
+                    "name": "dwd_app_ask_loan_result_all",
+                    "taskType": "SHELL",
+                    "taskParams": json.dumps(
+                        {
+                            "sql": "insert overwrite table dws_user_performance_first_loan_info select * from dwd_app_ask_loan_result_all"
+                        }
+                    ),
+                },
+                {
+                    "code": "task-dws",
+                    "name": "dws_user_performance_first_loan_info",
+                    "taskType": "SHELL",
+                },
+            ],
+        }
+
+        with mock.patch.object(module, "get_workflow_definition_detail", return_value=(True, detail, "")):
+            result = module.step2_search_in_workflow("wf-dws", "dws_user_performance_first_loan_info")
+
+        self.assertEqual(result["task_code"], "task-dws")
+        self.assertEqual(result["task_name"], "dws_user_performance_first_loan_info")
 
     def test_step2_search_in_workflow_does_not_match_sql_only_reference_from_other_task(self):
         module = load_module()
