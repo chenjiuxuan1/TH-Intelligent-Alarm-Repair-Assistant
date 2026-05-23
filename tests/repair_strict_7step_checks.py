@@ -343,6 +343,29 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(result["workflow_name"], "DWD")
         self.assertEqual(result["task_code"], "task-1")
 
+    def test_step2_search_in_workflow_loads_tasks_from_ds34_task_endpoint(self):
+        module = load_module()
+        seen_endpoints = []
+
+        def fake_ds_api_get(endpoint):
+            seen_endpoints.append(endpoint)
+            if endpoint == "/projects/default-project/workflow-definition/wf-34":
+                return False, {}, "not json"
+            if endpoint == "/projects/default-project/process-definition/wf-34":
+                return True, {"processDefinition": {"name": "DWS（1D）"}}, ""
+            if endpoint == "/projects/default-project/process-definition/wf-34/tasks":
+                return True, [
+                    {"code": "task-34", "name": "dws_user_performance_first_loan_info"}
+                ], ""
+            return False, {}, endpoint
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            result = module.step2_search_in_workflow("wf-34", "dws_user_performance_first_loan_info")
+
+        self.assertEqual(result["workflow_name"], "DWS（1D）")
+        self.assertEqual(result["task_code"], "task-34")
+        self.assertIn("/projects/default-project/process-definition/wf-34/tasks", seen_endpoints)
+
     def test_step2_search_in_workflow_does_not_match_sql_only_reference_from_other_task(self):
         module = load_module()
         detail = {
@@ -2636,13 +2659,36 @@ class RepairStrict7StepTests(unittest.TestCase):
                 return True, {"totalList": [], "totalPage": 1}, ""
             if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
                 return True, {"totalList": [{"code": "wf-1"}], "totalPage": 1}, ""
-            raise AssertionError(endpoint)
+            return False, {}, endpoint
 
         with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
             success, data, msg = module.get_workflow_definition_list()
 
         self.assertTrue(success)
         self.assertEqual(data["totalList"], [{"code": "wf-1"}])
+
+    def test_get_workflow_definition_list_uses_total_when_total_page_missing(self):
+        module = load_module()
+        seen_pages = []
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return False, {}, "not supported"
+            if "/process-definition?pageNo=" in endpoint:
+                page_no = int(endpoint.split("pageNo=")[1].split("&")[0])
+                seen_pages.append(page_no)
+                if page_no == 1:
+                    return True, {"totalList": [{"code": "wf-1"}], "total": 2}, ""
+                if page_no == 2:
+                    return True, {"totalList": [{"code": "wf-2"}], "total": 2}, ""
+            return False, {}, endpoint
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_workflow_definition_list()
+
+        self.assertTrue(success)
+        self.assertEqual(seen_pages, [1, 2])
+        self.assertEqual([item["code"] for item in data["totalList"]], ["wf-1", "wf-2"])
 
     def test_step3_start_repair_falls_back_when_process_style_returns_empty_success_data(self):
         module = load_module()

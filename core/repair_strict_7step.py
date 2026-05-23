@@ -21,6 +21,7 @@ import json
 import os
 import re
 import csv
+import math
 import urllib.request
 import urllib.error
 import time
@@ -266,16 +267,76 @@ def _get_instance_state_types_for_search(include_all=False):
 
 
 def get_workflow_definition_detail(workflow_code, project_code=None):
-    """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 详情接口"""
+    """兼容 DS 3.4/3.3 workflow-definition 与 DS 3.2 process-definition 详情接口"""
     project_code = project_code or PROJECT_CODE
     endpoints = _get_definition_detail_endpoints(project_code, workflow_code)
     last_msg = ""
     for endpoint in endpoints:
         success, detail, msg = ds_api_get(endpoint)
         if success:
+            if not extract_task_definition_list(detail):
+                tasks = get_task_definition_list_for_workflow(workflow_code, project_code)
+                if tasks:
+                    detail = dict(detail)
+                    detail['taskDefinitionList'] = tasks
             return True, detail, msg
         last_msg = msg
     return False, {}, last_msg
+
+
+def extract_task_definition_list(detail):
+    """从不同 DS 版本的详情或任务接口返回里提取任务定义列表。"""
+    if isinstance(detail, list):
+        return detail
+    if not isinstance(detail, dict):
+        return []
+
+    for key in (
+        'taskDefinitionList',
+        'taskDefinitionLogList',
+        'taskDefinitionLogs',
+        'taskList',
+        'tasks',
+        'nodeList',
+        'nodes',
+        'totalList',
+        'records',
+        'list',
+    ):
+        value = detail.get(key)
+        if isinstance(value, list):
+            return value
+
+    for key in ('dagData', 'processDefinition', 'workflowDefinition', 'data'):
+        nested = detail.get(key)
+        if isinstance(nested, dict):
+            nested_tasks = extract_task_definition_list(nested)
+            if nested_tasks:
+                return nested_tasks
+    return []
+
+
+def get_task_definition_list_for_workflow(workflow_code, project_code=None):
+    """DS 3.4 将任务列表拆到独立接口，这里按多种 endpoint 兜底查询。"""
+    project_code = project_code or PROJECT_CODE
+    endpoints = [
+        f"/projects/{project_code}/process-definition/{workflow_code}/tasks",
+        f"/projects/{project_code}/process-definition/query-task-definition-list?processDefinitionCode={workflow_code}",
+        f"/projects/{project_code}/process-definition/{workflow_code}/view-tree?limit=10000",
+        f"/projects/{project_code}/workflow-definition/{workflow_code}/tasks",
+        f"/projects/{project_code}/workflow-definition/query-task-definition-list?processDefinitionCode={workflow_code}",
+        f"/projects/{project_code}/workflow-definition/{workflow_code}/view-tree?limit=10000",
+    ]
+    last_msg = ''
+    for endpoint in endpoints:
+        success, data, msg = ds_api_get(endpoint)
+        if success:
+            tasks = extract_task_definition_list(data)
+            if tasks:
+                return tasks
+        last_msg = msg
+    debug_log(f"获取工作流任务列表失败 workflow={workflow_code} project={project_code}: {last_msg}")
+    return []
 
 
 def get_workflow_name_from_detail(detail):
@@ -298,10 +359,71 @@ def get_workflow_name_from_detail(detail):
     return ''
 
 
+def extract_list_payload_items(data):
+    """兼容 PageInfo/records/list 等 DS 版本差异，提取列表内容。"""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+
+    for key in ('totalList', 'records', 'list', 'data', 'processDefinitionList', 'workflowDefinitionList'):
+        value = data.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def get_page_total_pages(data, page_size, current_count):
+    if not isinstance(data, dict):
+        return 1
+    for key in ('totalPage', 'pages'):
+        value = data.get(key)
+        if value:
+            try:
+                return max(1, int(value))
+            except (TypeError, ValueError):
+                pass
+    total = data.get('total') or data.get('totalCount')
+    if total:
+        try:
+            total_value = int(total)
+            effective_page_size = current_count if current_count and total_value > current_count else page_size
+            return max(1, math.ceil(total_value / max(1, effective_page_size)))
+        except (TypeError, ValueError):
+            pass
+    if current_count >= page_size:
+        return 999999
+    return 1
+
+
+def merge_workflow_list_items(primary, extra):
+    merged = []
+    seen_codes = set()
+    for item in list(primary or []) + list(extra or []):
+        if not isinstance(item, dict):
+            continue
+        code = (
+            item.get('code')
+            or item.get('workflowDefinitionCode')
+            or item.get('processDefinitionCode')
+            or item.get('definitionCode')
+        )
+        if code in (None, ''):
+            continue
+        code_key = str(code)
+        if code_key in seen_codes:
+            continue
+        seen_codes.add(code_key)
+        merged.append(item)
+    return merged
+
+
 def get_workflow_definition_list():
-    """兼容 DS 3.3 workflow-definition 与 DS 3.2 process-definition 列表接口，并自动翻页"""
+    """兼容 DS 3.4/3.3 workflow-definition 与 DS 3.2 process-definition 列表接口，并自动翻页"""
     endpoint_templates = _get_definition_list_endpoint_templates()
     last_msg = ""
+    all_candidates = []
+    page_size = 100
 
     for endpoint_template in endpoint_templates:
         page_no = 1
@@ -316,19 +438,42 @@ def get_workflow_definition_list():
                 merged_total_list = []
                 break
 
-            merged_total_list.extend(data.get('totalList', []))
-            total_pages = data.get('totalPage') or 1
+            current_items = extract_list_payload_items(data)
+            merged_total_list.extend(current_items)
+            total_pages = get_page_total_pages(data, page_size, len(current_items))
             page_no += 1
+            if not current_items:
+                break
 
         if merged_total_list:
-            return True, {'totalList': merged_total_list}, ''
+            all_candidates = merge_workflow_list_items(all_candidates, merged_total_list)
+
+    list_endpoint_templates = [
+        "/projects/{project_code}/process-definition/list",
+        "/projects/{project_code}/process-definition/simple-list",
+        "/projects/{project_code}/process-definition/all",
+        "/projects/{project_code}/process-definition/query-process-definition-list",
+        "/projects/{project_code}/workflow-definition/list",
+        "/projects/{project_code}/workflow-definition/simple-list",
+        "/projects/{project_code}/workflow-definition/all",
+        "/projects/{project_code}/workflow-definition/query-process-definition-list",
+    ]
+    for endpoint_template in list_endpoint_templates:
+        endpoint = endpoint_template.format(project_code=PROJECT_CODE)
+        success, data, msg = ds_api_get(endpoint)
+        if success:
+            all_candidates = merge_workflow_list_items(all_candidates, extract_list_payload_items(data))
+        else:
+            last_msg = msg
 
     fallback_workflows = load_workflow_list_from_schedule_export()
-    if fallback_workflows:
+    all_candidates = merge_workflow_list_items(all_candidates, fallback_workflows)
+
+    if all_candidates:
         debug_log(
-            f"DS工作流列表接口失败，使用本地调度导出兜底: {len(fallback_workflows)} 个，最近错误: {last_msg}"
+            f"工作流列表合并完成: {len(all_candidates)} 个，最近接口错误: {last_msg}"
         )
-        return True, {'totalList': fallback_workflows}, ''
+        return True, {'totalList': all_candidates}, ''
 
     return False, {}, last_msg
 
@@ -1319,7 +1464,7 @@ def step2_search_in_workflow(workflow_code, table_name, visited=None):
         return None
     
     search_term = strip_table_prefix(table_name)
-    tasks = detail.get('taskDefinitionList', [])
+    tasks = extract_task_definition_list(detail)
     workflow_name = get_workflow_name_from_detail(detail)
     candidates = []
     child_candidates = []
