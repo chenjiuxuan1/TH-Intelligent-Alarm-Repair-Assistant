@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 # 配置
+SCRIPT_BUILD = 'v5.3-ds34-cross-project-20260523'
 WORKSPACE = WORKSPACE_CONFIG['root']
 AUTO_REPAIR_RECORDS_DIR = WORKSPACE_CONFIG['auto_repair_records_dir']
 DS_BASE = DS_CONFIG['base_url']
@@ -2776,7 +2777,7 @@ def send_tv_report_to_dingtalk(report_content):
 def main():
     """主函数"""
     log("="*70)
-    log("🚀 智能告警修复流程（v5.2 最终修复版）")
+    log(f"🚀 智能告警修复流程（{SCRIPT_BUILD}）")
     log("="*70)
     log(f"⏰ 执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     log("")
