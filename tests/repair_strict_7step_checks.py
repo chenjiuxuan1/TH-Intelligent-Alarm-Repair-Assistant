@@ -2983,6 +2983,73 @@ class RepairStrict7StepTests(unittest.TestCase):
         self.assertEqual(results[0]["instance_id"], 98765)
         self.assertEqual(running_instances[0]["instance_id"], 98765)
 
+    def test_should_delay_failed_state_confirmation_allows_short_recheck_window(self):
+        module = load_module()
+        item = {
+            "workflow_code": "18641948384363",
+            "first_seen_at": 100.0,
+            "failed_state_rechecks": 0,
+            "task": {"workflow_code": "18641948384363"},
+        }
+
+        with mock.patch("time.time", return_value=120.0):
+            self.assertTrue(module.should_delay_failed_state_confirmation(item, "STOP"))
+        self.assertEqual(item["failed_state_rechecks"], 1)
+
+    def test_should_delay_failed_state_confirmation_stops_after_grace_window(self):
+        module = load_module()
+        item = {
+            "workflow_code": "18641948384363",
+            "first_seen_at": 100.0,
+            "failed_state_rechecks": 0,
+            "task": {"workflow_code": "18641948384363"},
+        }
+
+        with mock.patch("time.time", return_value=200.0):
+            self.assertFalse(module.should_delay_failed_state_confirmation(item, "STOP"))
+        self.assertEqual(item["failed_state_rechecks"], 0)
+
+    def test_get_workflow_definition_list_falls_back_to_query_process_definition_list(self):
+        module = load_module()
+
+        def fake_ds_api_get(endpoint):
+            if endpoint.endswith("/workflow-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/process-definition?pageNo=1&pageSize=100"):
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint.endswith("/workflow-definition/query-workflow-definition-list"):
+                return False, {}, "not found"
+            if endpoint.endswith("/workflow-definition/query-process-definition-list"):
+                return False, {}, "not found"
+            if endpoint.endswith("/process-definition/query-workflow-definition-list"):
+                return False, {}, "not found"
+            if endpoint.endswith("/process-definition/query-process-definition-list"):
+                return True, [{"code": "wf-query"}], ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_workflow_definition_list()
+
+        self.assertTrue(success)
+        self.assertEqual(data["totalList"], [{"code": "wf-query"}])
+
+    def test_get_workflow_definition_detail_falls_back_to_workflow_definition_when_process_style_is_configured(self):
+        module = load_module()
+        module.DS_DEFINITION_ENDPOINT_STYLE = "process-definition"
+
+        def fake_ds_api_get(endpoint):
+            if endpoint == "/projects/default-project/process-definition/wf-query":
+                return False, {}, "non-json response: <!DOCTYPE html>"
+            if endpoint == "/projects/default-project/workflow-definition/wf-query":
+                return True, {"processDefinition": {"name": "WF Query"}}, ""
+            return False, {}, f"unexpected endpoint: {endpoint}"
+
+        with mock.patch.object(module, "ds_api_get", side_effect=fake_ds_api_get):
+            success, data, msg = module.get_workflow_definition_detail("wf-query")
+
+        self.assertTrue(success)
+        self.assertEqual(data["processDefinition"]["name"], "WF Query")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -66,6 +66,7 @@ DS_API_RETRY_COUNT = int(os.environ.get('DS_API_RETRY_COUNT', '2'))
 DS_API_GET_TIMEOUT_SECONDS = int(os.environ.get('DS_API_GET_TIMEOUT_SECONDS', '5'))
 DS_API_POST_TIMEOUT_SECONDS = int(os.environ.get('DS_API_POST_TIMEOUT_SECONDS', '30'))
 DS_STEP2_PROGRESS_EVERY = int(os.environ.get('DS_STEP2_PROGRESS_EVERY', '10'))
+FAILED_STATE_CONFIRMATION_GRACE_SECONDS = int(os.environ.get('FAILED_STATE_CONFIRMATION_GRACE_SECONDS', '90'))
 DS_PROJECT_SEARCH_KEYWORDS = [
     item.strip()
     for item in os.environ.get('DS_PROJECT_SEARCH_KEYWORDS', '泰国,TH,THA,tha').split(',')
@@ -84,9 +85,15 @@ def debug_log(msg):
 
 def _get_definition_detail_endpoints(project_code, workflow_code):
     if DS_DEFINITION_ENDPOINT_STYLE == 'workflow-definition':
-        return [f"/projects/{project_code}/workflow-definition/{workflow_code}"]
+        return [
+            f"/projects/{project_code}/workflow-definition/{workflow_code}",
+            f"/projects/{project_code}/process-definition/{workflow_code}",
+        ]
     if DS_DEFINITION_ENDPOINT_STYLE == 'process-definition':
-        return [f"/projects/{project_code}/process-definition/{workflow_code}"]
+        return [
+            f"/projects/{project_code}/process-definition/{workflow_code}",
+            f"/projects/{project_code}/workflow-definition/{workflow_code}",
+        ]
     return [
         f"/projects/{project_code}/workflow-definition/{workflow_code}",
         f"/projects/{project_code}/process-definition/{workflow_code}",
@@ -95,12 +102,30 @@ def _get_definition_detail_endpoints(project_code, workflow_code):
 
 def _get_definition_list_endpoint_templates():
     if DS_DEFINITION_ENDPOINT_STYLE == 'workflow-definition':
-        return ["/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100"]
+        return [
+            "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/workflow-definition/query-workflow-definition-list",
+            "/projects/{project_code}/workflow-definition/query-process-definition-list",
+            "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/process-definition/query-workflow-definition-list",
+            "/projects/{project_code}/process-definition/query-process-definition-list",
+        ]
     if DS_DEFINITION_ENDPOINT_STYLE == 'process-definition':
-        return ["/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100"]
+        return [
+            "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/process-definition/query-workflow-definition-list",
+            "/projects/{project_code}/process-definition/query-process-definition-list",
+            "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
+            "/projects/{project_code}/workflow-definition/query-workflow-definition-list",
+            "/projects/{project_code}/workflow-definition/query-process-definition-list",
+        ]
     return [
         "/projects/{project_code}/workflow-definition?pageNo={page_no}&pageSize=100",
         "/projects/{project_code}/process-definition?pageNo={page_no}&pageSize=100",
+        "/projects/{project_code}/workflow-definition/query-workflow-definition-list",
+        "/projects/{project_code}/workflow-definition/query-process-definition-list",
+        "/projects/{project_code}/process-definition/query-workflow-definition-list",
+        "/projects/{project_code}/process-definition/query-process-definition-list",
     ]
 
 
@@ -839,9 +864,11 @@ def maybe_replace_with_recent_real_instance(project_code, item, current_instance
 
     current_id = str((current_instance or {}).get('id') or item.get('instance_id') or '')
     start_response_id = str(item.get('start_response_id') or '')
+    current_state = str((current_instance or {}).get('state') or '').upper()
     should_recheck_recent = (
         not item.get('resolved_instance_id')
         or (start_response_id and current_id == start_response_id)
+        or current_state in {'STOP', 'FAILED', 'FAILURE', 'KILL', 'READY_STOP'}
     )
     if not should_recheck_recent:
         return current_instance
@@ -868,6 +895,32 @@ def maybe_replace_with_recent_real_instance(project_code, item, current_instance
         f"recent_state={recent_instance.get('state')}"
     )
     return recent_instance
+
+
+def should_delay_failed_state_confirmation(item, state):
+    """短暂延迟 STOP/FAILED 的最终判定，给 DS 集群一个再次识别真实实例的窗口。"""
+    normalized_state = str(state or '').upper()
+    if normalized_state not in {'FAILED', 'FAILURE', 'KILL', 'STOP', 'READY_STOP'}:
+        return False
+
+    workflow_code = item.get('workflow_code') or (item.get('task') or {}).get('workflow_code')
+    if not workflow_code:
+        return False
+
+    first_seen_at = item.get('first_seen_at')
+    if not first_seen_at:
+        return False
+
+    instance_age = time.time() - first_seen_at
+    if instance_age >= FAILED_STATE_CONFIRMATION_GRACE_SECONDS:
+        return False
+
+    rechecks = int(item.get('failed_state_rechecks', 0))
+    if rechecks >= 2:
+        return False
+
+    item['failed_state_rechecks'] = rechecks + 1
+    return True
 
 
 def collect_instance_query_diagnostics(project_code, instance_id, workflow_code=None, launched_at=None):
@@ -2174,6 +2227,10 @@ def step4_wait_and_check(running_instances, poll_interval=None, max_wait=None):
                     completed_tasks.append(item['task'])
                     status_changed = True
                 elif state in ['FAILED', 'KILL', 'STOP']:
+                    if should_delay_failed_state_confirmation(item, state):
+                        log(f"  ⚠️  {table}: 检测到 {state}，继续等待并重查真实实例")
+                        still_pending.append(item)
+                        continue
                     log(f"  ❌ {table}: 失败 ({state})")
                     item['task']['final_status'] = 'failed'
                     item['task']['error'] = f"状态: {state}"
@@ -2488,6 +2545,9 @@ def wait_for_fuyan_results(fuyan_results, poll_interval=10, max_wait=60):
             if state in ['SUCCESS', 'FINISHED']:
                 item['final_status'] = 'success'
             elif state in ['FAILED', 'KILL', 'STOP']:
+                if should_delay_failed_state_confirmation(item, state):
+                    still_pending[str(item.get('id'))] = item
+                    continue
                 item['final_status'] = 'failed'
                 item['error'] = f"状态: {state}"
             else:
