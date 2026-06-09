@@ -182,10 +182,10 @@ TV_CONFIG = {
 
 
 DB_CONFIG = {
-    "host": _get_env("DB_HOST", "172.20.0.235"),
-    "port": int(_get_env("DB_PORT", "13306")),
-    "user": _get_env("DB_USER", "e_ds"),
-    "password": _get_env("DB_PASSWORD", ""),
+    "host": _get_env("DB_HOST", "rm-gs533qw7xj1e7wdp7.mysql.singapore.rds.aliyuncs.com"),
+    "port": int(_get_env("DB_PORT", "3306")),
+    "user": _get_env("DB_USER", "a_dolphinscheduler"),
+    "password": _get_env("DB_PASSWORD", "T1FM!0aNYP0"),
     "database": _get_env("DB_NAME", "wattrel"),
     "charset": "utf8mb4",
 }
