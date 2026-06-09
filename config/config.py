@@ -185,7 +185,7 @@ DB_CONFIG = {
     "host": _get_env("DB_HOST", "rm-gs533qw7xj1e7wdp7.mysql.singapore.rds.aliyuncs.com"),
     "port": int(_get_env("DB_PORT", "3306")),
     "user": _get_env("DB_USER", "a_dolphinscheduler"),
-    "password": _get_env("DB_PASSWORD", "T1FM!0aNYP0"),
+    "password": _require_env("DB_PASSWORD", "请填写泰国 wattrel 数据库密码"),
     "database": _get_env("DB_NAME", "wattrel"),
     "charset": "utf8mb4",
 }
