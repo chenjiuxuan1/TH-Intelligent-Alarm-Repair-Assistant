@@ -594,7 +594,9 @@ def remove_backlog_items(backlog, candidate_keys):
     return backlog
 
 
-def format_tv_apply_summary(applied_items, disabled_items, failed_items):
+def format_tv_apply_summary(applied_items, disabled_items, failed_items, processed_sheet_rows=None, sheet_delete_result=None):
+    processed_sheet_rows = list(processed_sheet_rows or [])
+    sheet_delete_result = sheet_delete_result or {}
     lines = ["📋 数据质量规则处理结果", ""]
     if applied_items:
         lines.append("✅ 已补充规则:")
@@ -611,6 +613,12 @@ def format_tv_apply_summary(applied_items, disabled_items, failed_items):
         for item in failed_items:
             lines.append(f"• {item['country']} / {item['database']} / {item['dest_tbl']}")
             lines.append(f"  原因: {item.get('reason', '未知原因')}")
+        lines.append("")
+    if processed_sheet_rows and not sheet_delete_result.get("success"):
+        lines.append("🗑️ 请手动删除确认表中的已处理记录:")
+        lines.append(f"• 行号: {', '.join(str(row) for row in processed_sheet_rows)}")
+        if sheet_delete_result.get("reason"):
+            lines.append(f"• 未自动删除原因: {sheet_delete_result['reason']}")
         lines.append("")
     lines.append("请自行查看并按需调整。")
     return "\n".join(lines)

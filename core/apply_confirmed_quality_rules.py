@@ -171,15 +171,6 @@ def main():
 
     applied_items = [item for item in approved_items if item.get("status") == "applied"]
     disabled_items = [item for item in rejected_pending if item.get("status") == "disabled_auto_check"]
-    tv_result = {"success": True, "skipped": True}
-    summary_message = format_tv_apply_summary(applied_items, disabled_items, validation_failed)
-    if applied_items or disabled_items or validation_failed:
-        from core.send_tv_report import send_tv_report
-        tv_result = send_tv_report(
-            summary_message,
-            mentions=QUALITY_RULE_FORM_CONFIG.get("notify_mentions", []),
-            bot_id=QUALITY_RULE_FORM_CONFIG.get("notify_bot_id"),
-        )
 
     applied_sheet_rows = sorted(
         {
@@ -198,6 +189,21 @@ def main():
         reverse=True,
     )
     processed_sheet_rows = sorted(set(applied_sheet_rows + disabled_sheet_rows), reverse=True)
+    tv_result = {"success": True, "skipped": True}
+    summary_message = format_tv_apply_summary(
+        applied_items,
+        disabled_items,
+        validation_failed,
+        processed_sheet_rows=processed_sheet_rows,
+        sheet_delete_result={"success": False, "skipped": True, "reason": "manual_cleanup_required"},
+    )
+    if applied_items or disabled_items or validation_failed:
+        from core.send_tv_report import send_tv_report
+        tv_result = send_tv_report(
+            summary_message,
+            mentions=QUALITY_RULE_FORM_CONFIG.get("notify_mentions", []),
+            bot_id=QUALITY_RULE_FORM_CONFIG.get("notify_bot_id"),
+        )
 
     payload = {
         "approved_candidates": len(approved_items),
