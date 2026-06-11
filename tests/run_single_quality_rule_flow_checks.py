@@ -299,6 +299,95 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         module.build_count_rule_candidate.assert_called_once()
         module.build_exists_rule_candidate.assert_not_called()
 
+    def test_main_deletes_manual_confirmation_row_after_successful_submission(self):
+        module = load_module()
+
+        existing_row = {
+            "country": "ph",
+            "database": "dwd",
+            "tbl": "dwd_demo",
+            "auto_generate": "1",
+            "need_apply": "1",
+            "metric_field": "total_cost",
+            "src_sql": "",
+            "dest_sql": "",
+            "submitted_at": "2026-06-09 09:00:00",
+            "sheet_row_number": 12,
+        }
+        fake_conn = mock.MagicMock()
+        fake_cursor = mock.MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+
+        module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+        module.load_single_table = mock.MagicMock(return_value=({"tbl": "dwd_demo"}, "wattrel_etl_table_settings"))
+        module.load_quality_rules = mock.MagicMock(return_value=[])
+        module.load_ods_table_by_dest = mock.MagicMock(return_value={})
+        module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
+        module.parse_confirmation_rows = mock.MagicMock(return_value=[existing_row])
+        module.find_latest_confirmation_row = mock.MagicMock(return_value=existing_row)
+        module.confirmation_row_has_submittable_sql = mock.MagicMock(return_value=False)
+        module.find_latest_requested_metric_field = mock.MagicMock(return_value="total_cost")
+        module.load_backlog = mock.MagicMock(return_value={"items": {}})
+        module.backlog_item_has_submittable_sql = mock.MagicMock(return_value=True)
+        module.merge_candidates_into_backlog = mock.MagicMock(
+            return_value=(
+                {
+                    "items": {
+                        "dwd::dwd.dwd_demo::cnt": {
+                            "candidate_key": "dwd::dwd.dwd_demo::cnt",
+                            "status": "pending_confirmation",
+                            "dest_tbl": "dwd_demo",
+                            "src_sql": "select 1",
+                            "dest_sql": "select 2",
+                        }
+                    }
+                },
+                [{"candidate_key": "dwd::dwd.dwd_demo::cnt"}],
+            )
+        )
+        module.build_count_rule_candidate = mock.MagicMock(
+            return_value={
+                "status": "blocked",
+                "rule_name": "cnt",
+                "dest_tbl": "dwd_demo",
+                "dest_db": "dwd",
+                "src_db": "ods",
+                "src_tbl": "ods_demo",
+                "src_sql": "select 1",
+                "dest_sql": "select 2",
+                "check_field": "input_date",
+                "reason": "需要人工确认",
+            }
+        )
+        module.build_candidate_key = mock.MagicMock(return_value="dwd::dwd.dwd_demo::cnt")
+        module.submit_backlog_items_to_form = mock.MagicMock(
+            return_value={"submitted": 1, "results": [{"candidate_key": "dwd::dwd.dwd_demo::cnt", "ok": True}]}
+        )
+        module.compute_form_payload_signature = mock.MagicMock(return_value="sig")
+        module.extract_sheet_row_number = mock.MagicMock(return_value=12)
+        module.delete_confirmation_sheet_rows = mock.MagicMock(
+            return_value={"success": True, "deleted_rows": [12], "skipped": False}
+        )
+        module.save_backlog = mock.MagicMock()
+        module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
+
+        argv_backup = sys.argv
+        stdout_backup = sys.stdout
+        sys.argv = ["run_single_quality_rule_flow.py", "--database", "dwd", "--tbl", "dwd_demo"]
+        buffer = io.StringIO()
+        sys.stdout = buffer
+        try:
+            exit_code = module.main()
+        finally:
+            sys.argv = argv_backup
+            sys.stdout = stdout_backup
+
+        self.assertEqual(exit_code, 0)
+        module.delete_confirmation_sheet_rows.assert_called_once_with([12])
+        payload_text = buffer.getvalue().split("===FULL_CHAIN_RESULT===")[1].split("===LANGFUSE_BATCH===")[0].strip()
+        payload = json.loads(payload_text)
+        self.assertEqual(payload["manual_row_delete_result"]["deleted_rows"], [12])
+
     def test_main_skips_generation_when_confirmation_sheet_already_has_row(self):
         module = load_module()
 

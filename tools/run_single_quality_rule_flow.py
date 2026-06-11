@@ -17,6 +17,8 @@ from core.quality_rule_confirmation import (
     build_candidate_key,
     confirmation_row_has_submittable_sql,
     compute_form_payload_signature,
+    delete_confirmation_sheet_rows,
+    extract_sheet_row_number,
     fetch_confirmation_csv,
     find_latest_confirmation_row,
     find_latest_requested_metric_field,
@@ -121,6 +123,27 @@ def load_requested_metric_field(rows, database, table_name):
     return find_latest_requested_metric_field(rows, database, table_name)
 
 
+def maybe_delete_manual_confirmation_row(existing_confirmation_row, existing_confirmation_row_has_sql, success_keys, submitted_items):
+    if not existing_confirmation_row or existing_confirmation_row_has_sql:
+        return {"success": True, "skipped": True, "reason": "no_manual_row_to_delete"}
+    if not success_keys or not submitted_items:
+        return {"success": True, "skipped": True, "reason": "no_successful_submission"}
+
+    submitted_candidate_keys = {
+        item.get("candidate_key", "")
+        for item in submitted_items
+        if item.get("candidate_key")
+    }
+    if not submitted_candidate_keys.intersection(success_keys):
+        return {"success": True, "skipped": True, "reason": "manual_row_submission_not_successful"}
+
+    row_number = extract_sheet_row_number(existing_confirmation_row)
+    if row_number is None:
+        return {"success": True, "skipped": True, "reason": "manual_row_number_missing"}
+
+    return delete_confirmation_sheet_rows([row_number])
+
+
 def main():
     args = parse_args()
     database = args.database
@@ -135,9 +158,12 @@ def main():
         table_name,
         country=target_country,
     )
+    existing_confirmation_row_has_sql = bool(
+        existing_confirmation_row and confirmation_row_has_submittable_sql(existing_confirmation_row)
+    )
     requested_metric_field = load_requested_metric_field(confirmation_rows, database, table_name)
 
-    if existing_confirmation_row and confirmation_row_has_submittable_sql(existing_confirmation_row):
+    if existing_confirmation_row_has_sql:
         result = {
             "country": QUALITY_RULE_FORM_CONFIG.get("country", "ph"),
             "database": database,
@@ -233,6 +259,12 @@ def main():
             item["last_form_payload_signature"] = compute_form_payload_signature(item)
 
     save_backlog(backlog)
+    manual_row_delete_result = maybe_delete_manual_confirmation_row(
+        existing_confirmation_row,
+        existing_confirmation_row_has_sql,
+        success_keys,
+        form_items,
+    )
     payload = {
         "single_table": f"{database}.{table_name}",
         "candidate_key": candidate_key,
@@ -241,6 +273,7 @@ def main():
         "new_candidate_keys": [item["candidate_key"] for item in new_items],
         "form_submission_items": len(form_items),
         "form_result": form_result,
+        "manual_row_delete_result": manual_row_delete_result,
         "tv_result": empty_tv_result(),
         "backlog_item": target_item,
     }
