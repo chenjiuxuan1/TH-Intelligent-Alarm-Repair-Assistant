@@ -32,6 +32,7 @@ from core.quality_rule_ai_helper import generate_rule_candidate_with_ai
 COUNT_RULE_DATABASES = (
     "ods",
     "dwd",
+    "dwb",
     "dim",
     "ods_security",
     "dwd_paimon",
@@ -69,7 +70,7 @@ CHECK_FIELD_CANDIDATES = (
 
 
 def resolve_rule_name(database_name):
-    return COUNT_RULE_NAME if database_name in COUNT_RULE_DATABASES else EXISTS_RULE_NAME
+    return EXISTS_RULE_NAME if database_name in EXISTS_RULE_DATABASES else COUNT_RULE_NAME
 
 
 def parse_json_list(raw_value):
@@ -1622,11 +1623,13 @@ def build_exists_rule_candidate(database_name, table, rule_map, git_roots=None, 
 def scan_database_rules(cursor, database_name, monitor_level=None, git_roots=None):
     tables = load_tables(cursor, database_name, monitor_level=monitor_level)
     rule_map = load_quality_rules(cursor, database_name)
-    ods_table_by_dest = load_ods_table_by_dest(cursor) if database_name in COUNT_RULE_DATABASES else {}
+    ods_table_by_dest = load_ods_table_by_dest(cursor) if database_name not in EXISTS_RULE_DATABASES else {}
 
     results = []
     for table in tables:
-        if database_name in COUNT_RULE_DATABASES:
+        if database_name in EXISTS_RULE_DATABASES:
+            result = build_exists_rule_candidate(database_name, table, rule_map, git_roots=git_roots)
+        else:
             result = build_count_rule_candidate(
                 database_name,
                 table,
@@ -1635,8 +1638,6 @@ def scan_database_rules(cursor, database_name, monitor_level=None, git_roots=Non
                 git_roots=git_roots,
                 cursor=cursor,
             )
-        else:
-            result = build_exists_rule_candidate(database_name, table, rule_map, git_roots=git_roots)
         result["database"] = database_name
         results.append(result)
     return results
@@ -1920,10 +1921,6 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    invalid = [db for db in args.databases if db not in SUPPORTED_DATABASES]
-    if invalid:
-        print(f"不支持的数据库范围: {', '.join(invalid)}")
-        return 1
 
     results = scan_quality_rule_gaps(
         args.databases,

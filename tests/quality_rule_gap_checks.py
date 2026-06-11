@@ -80,6 +80,18 @@ class FakeConnection:
 
 
 class QualityRuleGapScannerTests(unittest.TestCase):
+    def test_dwb_is_supported_as_count_rule_database(self):
+        module = load_module()
+
+        self.assertIn("dwb", module.COUNT_RULE_DATABASES)
+        self.assertIn("dwb", module.SUPPORTED_DATABASES)
+        self.assertEqual(module.resolve_rule_name("dwb"), "cnt")
+
+    def test_unknown_database_defaults_to_count_rule(self):
+        module = load_module()
+
+        self.assertEqual(module.resolve_rule_name("foo_bar"), "cnt")
+
     def test_determine_create_field_prefers_created_at_like_columns(self):
         module = load_module()
         table = {
@@ -1014,6 +1026,19 @@ class QualityRuleGapScannerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         output = stdout.getvalue()
         self.assertIn("2026-06-04T16:00:00", output)
+
+    def test_main_accepts_unknown_database_without_rejecting(self):
+        module = load_module()
+        fake_results = [{"status": "candidate", "database": "foo_bar", "dest_tbl": "demo", "rule_name": "cnt", "reason": "ok"}]
+
+        with mock.patch.object(module, "scan_quality_rule_gaps", return_value=fake_results) as mocked_scan:
+            stdout = StringIO()
+            with mock.patch("sys.stdout", stdout):
+                exit_code = module.main(["--databases", "foo_bar", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(mocked_scan.call_args.args[0], ["foo_bar"])
+        self.assertIn('\"database\": \"foo_bar\"', stdout.getvalue())
 
     def test_apply_candidates_inserts_only_candidate_rules(self):
         fake_cursor = FakeCursor([[], []])

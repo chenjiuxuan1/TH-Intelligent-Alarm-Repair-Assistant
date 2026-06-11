@@ -257,6 +257,48 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(module.build_count_rule_candidate.call_args.kwargs["requested_metric_field"], "total_cost")
 
+    def test_main_routes_unknown_database_to_count_rule(self):
+        module = load_module()
+
+        fake_conn = mock.MagicMock()
+        fake_cursor = mock.MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+        module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+        module.load_single_table = mock.MagicMock(return_value=({"tbl": "foo_demo"}, "wattrel_etl_table_settings"))
+        module.load_quality_rules = mock.MagicMock(return_value=[])
+        module.load_ods_table_by_dest = mock.MagicMock(return_value={})
+        module.build_exists_rule_candidate = mock.MagicMock()
+        module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
+        module.parse_confirmation_rows = mock.MagicMock(return_value=[])
+        module.find_latest_confirmation_row = mock.MagicMock(return_value=None)
+        module.find_latest_requested_metric_field = mock.MagicMock(return_value="")
+        module.backlog_item_has_submittable_sql = mock.MagicMock(return_value=True)
+        module.build_count_rule_candidate = mock.MagicMock(
+            return_value={
+                "status": "existing",
+                "rule_name": "cnt",
+                "dest_tbl": "foo_demo",
+                "dest_db": "foo_bar",
+                "reason": "已存在 cnt 规则",
+            }
+        )
+        module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
+
+        argv_backup = sys.argv
+        stdout_backup = sys.stdout
+        sys.argv = ["run_single_quality_rule_flow.py", "--database", "foo_bar", "--tbl", "foo_demo"]
+        buffer = io.StringIO()
+        sys.stdout = buffer
+        try:
+            exit_code = module.main()
+        finally:
+            sys.argv = argv_backup
+            sys.stdout = stdout_backup
+
+        self.assertEqual(exit_code, 0)
+        module.build_count_rule_candidate.assert_called_once()
+        module.build_exists_rule_candidate.assert_not_called()
+
     def test_main_skips_generation_when_confirmation_sheet_already_has_row(self):
         module = load_module()
 

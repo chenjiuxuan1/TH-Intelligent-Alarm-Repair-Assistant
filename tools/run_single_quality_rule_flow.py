@@ -27,7 +27,6 @@ from core.quality_rule_confirmation import (
     submit_backlog_items_to_form,
 )
 from core.quality_rule_gap_scanner import (
-    COUNT_RULE_DATABASES,
     EXISTS_RULE_DATABASES,
     build_exists_rule_candidate,
     build_count_rule_candidate,
@@ -165,7 +164,7 @@ def main():
                 "country": QUALITY_RULE_FORM_CONFIG.get("country", "ph"),
                 "database": database,
                 "status": "blocked",
-                "rule_name": "cnt" if database in COUNT_RULE_DATABASES else "if_exists",
+                "rule_name": "if_exists" if database in EXISTS_RULE_DATABASES else "cnt",
                 "dest_tbl": table_name,
                 "dest_db": database,
                 "reason": f"未在 {config_table_name} 中查到表配置",
@@ -176,17 +175,7 @@ def main():
             return 0
 
         rules = load_quality_rules(cur, database)
-        if database in COUNT_RULE_DATABASES:
-            ods_map = load_ods_table_by_dest(cur)
-            raw_result = build_count_rule_candidate(
-                database,
-                table,
-                rules,
-                ods_map,
-                git_roots=git_roots,
-                requested_metric_field=requested_metric_field,
-            )
-        elif database in EXISTS_RULE_DATABASES:
+        if database in EXISTS_RULE_DATABASES:
             raw_result = build_exists_rule_candidate(
                 database,
                 table,
@@ -196,19 +185,15 @@ def main():
                 requested_metric_field=requested_metric_field,
             )
         else:
-            result = {
-                "country": QUALITY_RULE_FORM_CONFIG.get("country", "ph"),
-                "database": database,
-                "status": "blocked",
-                "rule_name": "",
-                "dest_tbl": table_name,
-                "dest_db": database,
-                "reason": f"不支持的数据库类型: {database}",
-                "ai_status": "not_applicable",
-                "validation_status": "not_validated",
-            }
-            emit(build_non_backlog_payload(database, table_name, result), {"batch": []})
-            return 0
+            ods_map = load_ods_table_by_dest(cur)
+            raw_result = build_count_rule_candidate(
+                database,
+                table,
+                rules,
+                ods_map,
+                git_roots=git_roots,
+                requested_metric_field=requested_metric_field,
+            )
     finally:
         conn.close()
 
