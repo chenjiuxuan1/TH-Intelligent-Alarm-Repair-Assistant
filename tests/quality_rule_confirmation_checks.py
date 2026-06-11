@@ -507,6 +507,21 @@ class QualityRuleConfirmationTests(unittest.TestCase):
 
         self.assertEqual(result, "total_cost")
 
+    def test_find_latest_requested_metric_field_matches_rows_with_inferred_database(self):
+        module, _ = load_module()
+        rows = [
+            {
+                "database": "",
+                "tbl": "dwb_user_mob",
+                "metric_field": "user_id",
+                "submitted_at": "2026-06-04 12:00:00",
+            }
+        ]
+
+        result = module.find_latest_requested_metric_field(rows, "", "dwb_user_mob")
+
+        self.assertEqual(result, "user_id")
+
     def test_find_latest_confirmation_row_filters_by_country_and_latest_submit_time(self):
         module, _ = load_module()
         rows = [
@@ -537,6 +552,64 @@ class QualityRuleConfirmationTests(unittest.TestCase):
 
         self.assertEqual(result["submitted_at"], "2026-06-08 12:00:00")
         self.assertEqual(result["country"], "ph")
+
+    def test_find_latest_confirmation_row_matches_blank_database_via_table_inference(self):
+        module, _ = load_module()
+        rows = [
+            {
+                "country": "th",
+                "database": "",
+                "tbl": "dwb_user_mob",
+                "submitted_at": "2026-06-08 12:00:00",
+                "need_apply": "0",
+            }
+        ]
+
+        result = module.find_latest_confirmation_row(rows, "", "dwb_user_mob", country="th")
+
+        self.assertEqual(result["tbl"], "dwb_user_mob")
+
+    def test_infer_database_from_local_git_uses_country_path(self):
+        module, _ = load_module()
+        with tempfile.TemporaryDirectory() as tempdir:
+            target = Path(tempdir) / "starrocks" / "workflow" / "th" / "dwb" / "dwb_user_mob"
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "dwb_user_mob.sql").write_text("select 1\n", encoding="utf-8")
+            module.QUALITY_RULE_FORM_CONFIG["git_scan_roots"] = [tempdir]
+            module._infer_database_from_local_git_cached.cache_clear()
+
+            result = module.infer_database_from_local_git("dwb_user_mob", country="th")
+
+        self.assertEqual(result, "dwb")
+
+    def test_find_latest_generation_request_row_prefers_latest_blank_manual_row(self):
+        module, _ = load_module()
+        rows = [
+            {
+                "country": "th",
+                "database": "ads",
+                "tbl": "ads_demo",
+                "auto_generate": "1",
+                "dest_sql": "select 1",
+                "sheet_row_number": 20,
+                "submitted_at": "2026-06-09 18:00:00",
+            },
+            {
+                "country": "th",
+                "database": "ads",
+                "tbl": "ads_demo",
+                "auto_generate": "1",
+                "dest_sql": "",
+                "src_sql": "",
+                "sheet_row_number": 35,
+                "submitted_at": "2026-06-10 18:00:00",
+            },
+        ]
+
+        result = module.find_latest_generation_request_row(rows, "ads", "ads_demo", country="th")
+
+        self.assertEqual(result["sheet_row_number"], 35)
+        self.assertEqual(result["dest_sql"], "")
 
     def test_build_form_payload_requires_candidate_key(self):
         module, _ = load_module()

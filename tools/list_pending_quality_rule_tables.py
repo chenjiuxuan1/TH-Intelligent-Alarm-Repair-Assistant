@@ -13,7 +13,8 @@ from core.quality_rule_confirmation import (
     auto_generate_is_enabled,
     confirmation_row_has_submittable_sql,
     fetch_confirmation_csv,
-    find_latest_confirmation_row,
+    find_latest_generation_request_row,
+    infer_database_from_row,
     parse_confirmation_rows,
 )
 from core.quality_rule_gap_scanner import list_pending_generation_tables, scan_quality_rule_gaps
@@ -68,7 +69,7 @@ def filter_existing_confirmation_rows(items, confirmation_rows):
     target_country = str(QUALITY_RULE_FORM_CONFIG.get("country", "ph")).strip().lower()
     filtered = []
     for item in items:
-        latest_row = find_latest_confirmation_row(
+        latest_row = find_latest_generation_request_row(
             confirmation_rows,
             item.get("database", ""),
             item.get("tbl", ""),
@@ -90,8 +91,8 @@ def extract_manual_pending_rows(confirmation_rows, target_country):
             continue
         if not auto_generate_is_enabled(row.get("auto_generate")):
             continue
-        database = (row.get("database") or "").strip()
         tbl = (row.get("tbl") or row.get("dest_tbl") or "").strip()
+        database = infer_database_from_row(row, country=row_country)
         if not database or not tbl:
             continue
         if confirmation_row_has_submittable_sql(row):

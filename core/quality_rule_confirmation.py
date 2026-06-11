@@ -4,10 +4,12 @@ from __future__ import annotations
 import csv
 import html
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -18,6 +20,18 @@ from core.send_tv_report import send_tv_report
 
 QUALITY_RULE_BACKLOG_FILE = WORKSPACE_CONFIG["quality_rule_backlog_file"]
 QUALITY_RULE_SYNC_STATE_FILE = WORKSPACE_CONFIG["quality_rule_sync_state_file"]
+DATABASE_PREFIX_HINTS = (
+    "ads_sec",
+    "ods_security",
+    "dwd_paimon",
+    "dim_sec",
+    "dwd_sec",
+    "ads",
+    "ods",
+    "dwd",
+    "dwb",
+    "dim",
+)
 
 
 def ensure_parent_dir(path):
@@ -585,6 +599,12 @@ def extract_sheet_row_number(row):
     return None
 
 
+def build_confirmation_row_sort_key(row):
+    row_number = extract_sheet_row_number(row) or 0
+    submitted_at = (row.get("submitted_at") or "").strip()
+    return (row_number, submitted_at)
+
+
 def build_decision_signature(row):
     candidate_key = infer_candidate_key_from_row(row)
     submitted_at = (row.get("submitted_at") or "").strip()
@@ -623,12 +643,123 @@ def human_check_is_enabled(value):
     return normalized in {"1", "yes", "y", "true", "pass", "通过", "确认"}
 
 
+def infer_database_from_table_name(tbl, country=""):
+    table_name = (tbl or "").strip().lower()
+    if not table_name:
+        return ""
+
+    for prefix in DATABASE_PREFIX_HINTS:
+        if table_name == prefix or table_name.startswith(f"{prefix}_"):
+            return prefix
+
+    return infer_database_from_local_git(table_name, country=country)
+
+
+def infer_database_from_row(row, country=""):
+    database = (row.get("database") or "").strip().lower()
+    if database:
+        return database
+
+    row_country = str(
+        row.get("country") or country or QUALITY_RULE_FORM_CONFIG.get("country", "ph")
+    ).strip().lower()
+    tbl = (row.get("tbl") or row.get("dest_tbl") or "").strip()
+    return infer_database_from_table_name(tbl, country=row_country)
+
+
+def _resolve_git_scan_roots(country=""):
+    configured_roots = [
+        str(item).strip()
+        for item in QUALITY_RULE_FORM_CONFIG.get("git_scan_roots", [])
+        if str(item).strip()
+    ]
+    target_country = (country or QUALITY_RULE_FORM_CONFIG.get("country", "ph")).strip().lower()
+    default_roots = [
+        f"/data/git/starrocks/workflow/{target_country}",
+        "/data/git/starrocks/workflow",
+        "/data/git/starrocks.bk/workflow",
+        "/data/git",
+    ]
+    roots = []
+    seen = set()
+    for root in configured_roots + default_roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        if os.path.isdir(root):
+            roots.append(root)
+    return tuple(roots)
+
+
+def _extract_database_from_git_path(path, country=""):
+    parts = [part.strip().lower() for part in Path(path).parts if str(part).strip()]
+    if not parts:
+        return ""
+
+    target_country = (country or "").strip().lower()
+    if target_country and target_country in parts:
+        country_index = parts.index(target_country)
+        if country_index + 1 < len(parts):
+            return parts[country_index + 1]
+
+    for marker in ("workflow", "starrocks", "starrocks.bk"):
+        if marker in parts:
+            marker_index = parts.index(marker)
+            tail = parts[marker_index + 1 :]
+            if len(tail) >= 2 and len(tail[0]) == 2:
+                return tail[1]
+
+    return ""
+
+
+@lru_cache(maxsize=2048)
+def _infer_database_from_local_git_cached(tbl, country, roots):
+    table_name = (tbl or "").strip().lower()
+    if not table_name:
+        return ""
+
+    best_match = ("", -1, "")
+    for root in roots:
+        root_path = Path(root)
+        if not root_path.exists():
+            continue
+        for current_root, dirnames, filenames in os.walk(root_path):
+            dirnames[:] = [name for name in dirnames if name != ".git"]
+            for filename in filenames:
+                file_path = Path(current_root) / filename
+                stem = file_path.stem.strip().lower()
+                if stem != table_name and table_name not in filename.lower():
+                    continue
+                database = _extract_database_from_git_path(file_path, country=country)
+                if not database:
+                    continue
+                score = 0
+                if stem == table_name:
+                    score += 100
+                if f"/{country}/" in str(file_path).lower():
+                    score += 10
+                if score > best_match[1]:
+                    best_match = (database, score, str(file_path))
+    return best_match[0]
+
+
+def infer_database_from_local_git(tbl, country=""):
+    roots = _resolve_git_scan_roots(country=country)
+    if not roots:
+        return ""
+    return _infer_database_from_local_git_cached(
+        (tbl or "").strip().lower(),
+        (country or "").strip().lower(),
+        roots,
+    )
+
+
 def infer_candidate_key_from_row(row):
     existing = (row.get("candidate_key") or "").strip()
     if existing:
         return existing
 
-    database = (row.get("database") or "").strip()
+    database = infer_database_from_row(row)
     dest_tbl = (row.get("tbl") or row.get("dest_tbl") or "").strip()
     if not database or not dest_tbl:
         return ""
@@ -645,26 +776,25 @@ def latest_decisions_by_candidate(rows):
             continue
         row["candidate_key"] = key
         current = decisions.get(key)
-        submitted_at = row.get("submitted_at", "")
-        if current is None or submitted_at >= current.get("submitted_at", ""):
+        if current is None or build_confirmation_row_sort_key(row) >= build_confirmation_row_sort_key(current):
             decisions[key] = row
     return decisions
 
 
 def find_latest_requested_metric_field(rows, database, tbl):
-    database = (database or "").strip()
+    country = str(QUALITY_RULE_FORM_CONFIG.get("country", "ph")).strip().lower()
+    database = (database or "").strip().lower() or infer_database_from_table_name(tbl, country=country)
     tbl = (tbl or "").strip()
     latest_row = None
     for row in rows:
-        row_database = (row.get("database") or "").strip()
+        row_database = infer_database_from_row(row, country=country)
         row_tbl = (row.get("tbl") or row.get("dest_tbl") or "").strip()
         metric_field = normalize_requested_metric_field(row.get("metric_field"))
         if not metric_field:
             continue
         if row_database != database or row_tbl != tbl:
             continue
-        submitted_at = (row.get("submitted_at") or "").strip()
-        if latest_row is None or submitted_at >= (latest_row.get("submitted_at") or ""):
+        if latest_row is None or build_confirmation_row_sort_key(row) >= build_confirmation_row_sort_key(latest_row):
             latest_row = row
     if latest_row is None:
         return ""
@@ -672,30 +802,60 @@ def find_latest_requested_metric_field(rows, database, tbl):
 
 
 def find_latest_confirmation_row(rows, database, tbl, country=""):
-    database = (database or "").strip()
+    database = (database or "").strip().lower() or infer_database_from_table_name(tbl, country=country)
     tbl = (tbl or "").strip()
     country = (country or "").strip().lower()
     latest_row = None
     for row in rows:
-        row_database = (row.get("database") or "").strip()
-        row_tbl = (row.get("tbl") or row.get("dest_tbl") or "").strip()
         row_country = str(
             row.get("country") or QUALITY_RULE_FORM_CONFIG.get("country", "ph")
         ).strip().lower()
+        row_database = infer_database_from_row(row, country=row_country or country)
+        row_tbl = (row.get("tbl") or row.get("dest_tbl") or "").strip()
         if row_database != database or row_tbl != tbl:
             continue
         if country and row_country != country:
             continue
-        submitted_at = (row.get("submitted_at") or "").strip()
-        if latest_row is None or submitted_at >= (latest_row.get("submitted_at") or ""):
+        if latest_row is None or build_confirmation_row_sort_key(row) >= build_confirmation_row_sort_key(latest_row):
             latest_row = row
     return latest_row
+
+
+def find_latest_generation_request_row(rows, database, tbl, country=""):
+    database = (database or "").strip().lower() or infer_database_from_table_name(tbl, country=country)
+    tbl = (tbl or "").strip()
+    country = (country or "").strip().lower()
+
+    latest_blank_request_row = None
+    latest_any_row = None
+    for row in rows:
+        row_country = str(
+            row.get("country") or QUALITY_RULE_FORM_CONFIG.get("country", "ph")
+        ).strip().lower()
+        row_database = infer_database_from_row(row, country=row_country or country)
+        row_tbl = (row.get("tbl") or row.get("dest_tbl") or "").strip()
+        if row_database != database or row_tbl != tbl:
+            continue
+        if country and row_country != country:
+            continue
+
+        if latest_any_row is None or build_confirmation_row_sort_key(row) >= build_confirmation_row_sort_key(latest_any_row):
+            latest_any_row = row
+
+        if not auto_generate_is_enabled(row.get("auto_generate")):
+            continue
+        if confirmation_row_has_submittable_sql(row):
+            continue
+        if latest_blank_request_row is None or build_confirmation_row_sort_key(row) >= build_confirmation_row_sort_key(latest_blank_request_row):
+            latest_blank_request_row = row
+
+    return latest_blank_request_row or latest_any_row
 
 
 def confirmation_row_has_submittable_sql(row):
     if not row:
         return False
-    database = (row.get("database") or "").strip()
+    database = infer_database_from_row(row)
     rule_name = (row.get("rule_name") or "").strip().lower()
     if not rule_name and database:
         rule_name = resolve_rule_name(database)
