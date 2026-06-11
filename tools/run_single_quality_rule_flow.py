@@ -16,16 +16,17 @@ from core.quality_rule_confirmation import (
     backlog_item_has_submittable_sql,
     build_candidate_key,
     confirmation_row_has_submittable_sql,
+    confirmation_row_disables_auto_generation,
     compute_form_payload_signature,
-    delete_confirmation_sheet_rows,
-    extract_sheet_row_number,
     fetch_confirmation_csv,
-    find_latest_confirmation_row,
+    find_latest_generation_request_row,
     find_latest_requested_metric_field,
     load_backlog,
     merge_candidates_into_backlog,
     parse_confirmation_rows,
+    result_to_backlog_item,
     save_backlog,
+    submit_disable_auto_generate_items_to_form,
     submit_backlog_items_to_form,
 )
 from core.quality_rule_gap_scanner import (
@@ -35,6 +36,7 @@ from core.quality_rule_gap_scanner import (
     default_git_scan_roots,
     load_ods_table_by_dest,
     load_quality_rules,
+    resolve_rule_name,
 )
 
 
@@ -123,27 +125,6 @@ def load_requested_metric_field(rows, database, table_name):
     return find_latest_requested_metric_field(rows, database, table_name)
 
 
-def maybe_delete_manual_confirmation_row(existing_confirmation_row, existing_confirmation_row_has_sql, success_keys, submitted_items):
-    if not existing_confirmation_row or existing_confirmation_row_has_sql:
-        return {"success": True, "skipped": True, "reason": "no_manual_row_to_delete"}
-    if not success_keys or not submitted_items:
-        return {"success": True, "skipped": True, "reason": "no_successful_submission"}
-
-    submitted_candidate_keys = {
-        item.get("candidate_key", "")
-        for item in submitted_items
-        if item.get("candidate_key")
-    }
-    if not submitted_candidate_keys.intersection(success_keys):
-        return {"success": True, "skipped": True, "reason": "manual_row_submission_not_successful"}
-
-    row_number = extract_sheet_row_number(existing_confirmation_row)
-    if row_number is None:
-        return {"success": True, "skipped": True, "reason": "manual_row_number_missing"}
-
-    return delete_confirmation_sheet_rows([row_number])
-
-
 def main():
     args = parse_args()
     database = args.database
@@ -152,7 +133,7 @@ def main():
     git_roots = args.git_roots or default_git_scan_roots()
     confirmation_rows = load_confirmation_rows()
     target_country = str(QUALITY_RULE_FORM_CONFIG.get("country", "ph")).strip().lower()
-    existing_confirmation_row = find_latest_confirmation_row(
+    existing_confirmation_row = find_latest_generation_request_row(
         confirmation_rows,
         database,
         table_name,
@@ -190,7 +171,7 @@ def main():
                 "country": QUALITY_RULE_FORM_CONFIG.get("country", "ph"),
                 "database": database,
                 "status": "blocked",
-                "rule_name": "if_exists" if database in EXISTS_RULE_DATABASES else "cnt",
+                "rule_name": resolve_rule_name(database),
                 "dest_tbl": table_name,
                 "dest_db": database,
                 "reason": f"未在 {config_table_name} 中查到表配置",
@@ -233,7 +214,43 @@ def main():
         if result.get("candidate"):
             result["candidate"]["requested_metric_field"] = requested_metric_field
     if result.get("status") in {"existing", "skipped"}:
-        emit(build_non_backlog_payload(database, table_name, result), load_langfuse_batch())
+        payload = build_non_backlog_payload(database, table_name, result)
+        if result.get("status") == "existing":
+            if existing_confirmation_row and confirmation_row_disables_auto_generation(existing_confirmation_row):
+                pass
+            elif existing_confirmation_row and not existing_confirmation_row_has_sql:
+                backfill_item = result_to_backlog_item(result, detected_at=detected_at)
+                backfill_item["form_submitted_at"] = None
+                backfill_item["last_form_payload_signature"] = ""
+                if backlog_item_has_submittable_sql(backfill_item):
+                    form_result = submit_backlog_items_to_form([backfill_item], dry_run=False)
+                    success_keys = {
+                        row["candidate_key"]
+                        for row in form_result.get("results", [])
+                        if row.get("ok")
+                    }
+                    if backfill_item["candidate_key"] in success_keys:
+                        backfill_item["form_submitted_at"] = detected_at
+                        backfill_item["last_form_payload_signature"] = compute_form_payload_signature(backfill_item)
+                    payload["form_submission_items"] = 1
+                    payload["form_result"] = form_result
+                    payload["backlog_item"] = backfill_item
+            elif not existing_confirmation_row or not confirmation_row_disables_auto_generation(existing_confirmation_row):
+                disable_item = {
+                    "candidate_key": build_candidate_key(result),
+                    "country": QUALITY_RULE_FORM_CONFIG.get("country", "ph"),
+                    "database": database,
+                    "dest_db": result.get("dest_db") or database,
+                    "dest_tbl": table_name,
+                    "src_sql": result.get("src_sql", ""),
+                    "dest_sql": result.get("dest_sql", ""),
+                    "reason": "告警库已存在相关校验规则，系统已自动登记关闭自动生成",
+                }
+                form_result = submit_disable_auto_generate_items_to_form([disable_item], dry_run=False)
+                payload["form_submission_items"] = 1
+                payload["form_result"] = form_result
+                payload["backlog_item"] = disable_item
+        emit(payload, load_langfuse_batch())
         return 0
 
     backlog = load_backlog()
@@ -259,12 +276,6 @@ def main():
             item["last_form_payload_signature"] = compute_form_payload_signature(item)
 
     save_backlog(backlog)
-    manual_row_delete_result = maybe_delete_manual_confirmation_row(
-        existing_confirmation_row,
-        existing_confirmation_row_has_sql,
-        success_keys,
-        form_items,
-    )
     payload = {
         "single_table": f"{database}.{table_name}",
         "candidate_key": candidate_key,
@@ -273,7 +284,6 @@ def main():
         "new_candidate_keys": [item["candidate_key"] for item in new_items],
         "form_submission_items": len(form_items),
         "form_result": form_result,
-        "manual_row_delete_result": manual_row_delete_result,
         "tv_result": empty_tv_result(),
         "backlog_item": target_item,
     }

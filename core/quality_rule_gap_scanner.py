@@ -964,7 +964,19 @@ def list_pending_generation_tables(databases=None, monitor_level=None):
                     target_table = table["dest_tbl"] if database_name in ("ods", "ods_security") else table["tbl"]
                     if (database_name, target_table) not in alert_tables:
                         continue
-                    if first_existing_rule(rule_map, target_table):
+                    existing_rule = first_existing_rule(rule_map, target_table)
+                    if existing_rule:
+                        items.append(
+                            {
+                                "database": database_name,
+                                "tbl": target_table,
+                                "dest_db": existing_rule.get("dest_db") or (table.get("dest_db") or database_name),
+                                "rule_name": existing_rule.get("name") or rule_name,
+                                "status": "existing",
+                                "reason": "告警库已存在相关校验规则，待在确认表关闭自动生成",
+                                "monitor_level": table.get("monitor_level"),
+                            }
+                        )
                         continue
                     if database_name in ("ods", "ods_security"):
                         if table.get("pk") is None:

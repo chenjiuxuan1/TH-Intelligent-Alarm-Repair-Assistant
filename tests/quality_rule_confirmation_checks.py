@@ -621,6 +621,34 @@ class QualityRuleConfirmationTests(unittest.TestCase):
                 required_fields=module.QUALITY_RULE_FORM_CONFIG["required_fields"],
             )
 
+    def test_build_disable_auto_generate_form_payload_marks_need_apply_zero(self):
+        module, _ = load_module()
+
+        payload = module.build_disable_auto_generate_form_payload(
+            {
+                "candidate_key": "dwd::dwd.dwd_user_member_log::cnt",
+                "country": "ph",
+                "database": "dwd",
+                "dest_tbl": "dwd_user_member_log",
+                "src_sql": "select 1",
+                "dest_sql": "select 2",
+                "reason": "已有规则",
+            }
+        )
+
+        self.assertEqual(payload["need_apply"], "0")
+        self.assertEqual(payload["human_check"], "1")
+        self.assertEqual(payload["auto_generate"], "0")
+
+    def test_confirmation_row_disables_auto_generation_for_need_apply_zero(self):
+        module, _ = load_module()
+
+        self.assertTrue(
+            module.confirmation_row_disables_auto_generation(
+                {"need_apply": "0", "auto_generate": ""}
+            )
+        )
+
     def test_update_backlog_with_need_apply_zero_marks_item_rejected(self):
         module, _ = load_module()
         backlog_item = module.candidate_to_backlog_item(self.make_candidate_result(), detected_at="2026-06-04 12:00:00")

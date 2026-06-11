@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.config import QUALITY_RULE_FORM_CONFIG
 from core.quality_rule_confirmation import (
     auto_generate_is_enabled,
+    confirmation_row_disables_auto_generation,
     confirmation_row_has_submittable_sql,
     fetch_confirmation_csv,
     find_latest_generation_request_row,
@@ -75,7 +76,10 @@ def filter_existing_confirmation_rows(items, confirmation_rows):
             item.get("tbl", ""),
             country=target_country,
         )
-        if latest_row and confirmation_row_has_submittable_sql(latest_row):
+        if latest_row and (
+            confirmation_row_has_submittable_sql(latest_row)
+            or confirmation_row_disables_auto_generation(latest_row)
+        ):
             continue
         filtered.append(item)
     return filtered

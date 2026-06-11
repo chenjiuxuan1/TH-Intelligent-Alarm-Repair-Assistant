@@ -118,7 +118,8 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         module.build_candidate_key = mock.MagicMock(return_value="dwd::dwd.dwd_demo::cnt")
         module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
         module.parse_confirmation_rows = mock.MagicMock(return_value=[])
-        module.find_latest_confirmation_row = mock.MagicMock(return_value=None)
+        module.find_latest_generation_request_row = mock.MagicMock(return_value=None)
+        module.confirmation_row_disables_auto_generation = mock.MagicMock(return_value=False)
         module.find_latest_requested_metric_field = mock.MagicMock(return_value="")
         module.submit_backlog_items_to_form = mock.MagicMock(
             return_value={"submitted": 1, "results": [{"candidate_key": "dwd::dwd.dwd_demo::cnt", "ok": True}]}
@@ -126,6 +127,9 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         module.compute_form_payload_signature = mock.MagicMock(return_value="sig")
         module.save_backlog = mock.MagicMock()
         module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
+        module.submit_disable_auto_generate_items_to_form = mock.MagicMock(
+            return_value={"submitted": 1, "results": [{"candidate_key": "dwd::dwd.dwd_demo::cnt", "ok": True}]}
+        )
 
         argv_backup = sys.argv
         stdout_backup = sys.stdout
@@ -190,7 +194,7 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         module.build_candidate_key = mock.MagicMock(return_value="ads_sec::ads_sec.ads_demo::if_exists")
         module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
         module.parse_confirmation_rows = mock.MagicMock(return_value=[])
-        module.find_latest_confirmation_row = mock.MagicMock(return_value=None)
+        module.find_latest_generation_request_row = mock.MagicMock(return_value=None)
         module.find_latest_requested_metric_field = mock.MagicMock(return_value="")
         module.backlog_item_has_submittable_sql = mock.MagicMock(return_value=False)
         module.submit_backlog_items_to_form = mock.MagicMock()
@@ -229,9 +233,12 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         module.load_ods_table_by_dest = mock.MagicMock(return_value={})
         module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
         module.parse_confirmation_rows = mock.MagicMock(return_value=[{"database": "dwd", "tbl": "dwd_demo", "metric_field": "total_cost", "submitted_at": "2026-06-08 10:00:00"}])
-        module.find_latest_confirmation_row = mock.MagicMock(return_value=None)
+        module.find_latest_generation_request_row = mock.MagicMock(return_value=None)
         module.find_latest_requested_metric_field = mock.MagicMock(return_value="total_cost")
         module.backlog_item_has_submittable_sql = mock.MagicMock(return_value=True)
+        module.submit_disable_auto_generate_items_to_form = mock.MagicMock(
+            return_value={"submitted": 1, "results": [{"candidate_key": "dwd::dwd.dwd_demo::cnt", "ok": True}]}
+        )
         module.build_count_rule_candidate = mock.MagicMock(
             return_value={
                 "status": "existing",
@@ -256,137 +263,7 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(module.build_count_rule_candidate.call_args.kwargs["requested_metric_field"], "total_cost")
-
-    def test_main_routes_unknown_database_to_count_rule(self):
-        module = load_module()
-
-        fake_conn = mock.MagicMock()
-        fake_cursor = mock.MagicMock()
-        fake_conn.cursor.return_value = fake_cursor
-        module.get_db_connection = mock.MagicMock(return_value=fake_conn)
-        module.load_single_table = mock.MagicMock(return_value=({"tbl": "foo_demo"}, "wattrel_etl_table_settings"))
-        module.load_quality_rules = mock.MagicMock(return_value=[])
-        module.load_ods_table_by_dest = mock.MagicMock(return_value={})
-        module.build_exists_rule_candidate = mock.MagicMock()
-        module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
-        module.parse_confirmation_rows = mock.MagicMock(return_value=[])
-        module.find_latest_confirmation_row = mock.MagicMock(return_value=None)
-        module.find_latest_requested_metric_field = mock.MagicMock(return_value="")
-        module.backlog_item_has_submittable_sql = mock.MagicMock(return_value=True)
-        module.build_count_rule_candidate = mock.MagicMock(
-            return_value={
-                "status": "existing",
-                "rule_name": "cnt",
-                "dest_tbl": "foo_demo",
-                "dest_db": "foo_bar",
-                "reason": "已存在 cnt 规则",
-            }
-        )
-        module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
-
-        argv_backup = sys.argv
-        stdout_backup = sys.stdout
-        sys.argv = ["run_single_quality_rule_flow.py", "--database", "foo_bar", "--tbl", "foo_demo"]
-        buffer = io.StringIO()
-        sys.stdout = buffer
-        try:
-            exit_code = module.main()
-        finally:
-            sys.argv = argv_backup
-            sys.stdout = stdout_backup
-
-        self.assertEqual(exit_code, 0)
-        module.build_count_rule_candidate.assert_called_once()
-        module.build_exists_rule_candidate.assert_not_called()
-
-    def test_main_deletes_manual_confirmation_row_after_successful_submission(self):
-        module = load_module()
-
-        existing_row = {
-            "country": "ph",
-            "database": "dwd",
-            "tbl": "dwd_demo",
-            "auto_generate": "1",
-            "need_apply": "1",
-            "metric_field": "total_cost",
-            "src_sql": "",
-            "dest_sql": "",
-            "submitted_at": "2026-06-09 09:00:00",
-            "sheet_row_number": 12,
-        }
-        fake_conn = mock.MagicMock()
-        fake_cursor = mock.MagicMock()
-        fake_conn.cursor.return_value = fake_cursor
-
-        module.get_db_connection = mock.MagicMock(return_value=fake_conn)
-        module.load_single_table = mock.MagicMock(return_value=({"tbl": "dwd_demo"}, "wattrel_etl_table_settings"))
-        module.load_quality_rules = mock.MagicMock(return_value=[])
-        module.load_ods_table_by_dest = mock.MagicMock(return_value={})
-        module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
-        module.parse_confirmation_rows = mock.MagicMock(return_value=[existing_row])
-        module.find_latest_confirmation_row = mock.MagicMock(return_value=existing_row)
-        module.confirmation_row_has_submittable_sql = mock.MagicMock(return_value=False)
-        module.find_latest_requested_metric_field = mock.MagicMock(return_value="total_cost")
-        module.load_backlog = mock.MagicMock(return_value={"items": {}})
-        module.backlog_item_has_submittable_sql = mock.MagicMock(return_value=True)
-        module.merge_candidates_into_backlog = mock.MagicMock(
-            return_value=(
-                {
-                    "items": {
-                        "dwd::dwd.dwd_demo::cnt": {
-                            "candidate_key": "dwd::dwd.dwd_demo::cnt",
-                            "status": "pending_confirmation",
-                            "dest_tbl": "dwd_demo",
-                            "src_sql": "select 1",
-                            "dest_sql": "select 2",
-                        }
-                    }
-                },
-                [{"candidate_key": "dwd::dwd.dwd_demo::cnt"}],
-            )
-        )
-        module.build_count_rule_candidate = mock.MagicMock(
-            return_value={
-                "status": "blocked",
-                "rule_name": "cnt",
-                "dest_tbl": "dwd_demo",
-                "dest_db": "dwd",
-                "src_db": "ods",
-                "src_tbl": "ods_demo",
-                "src_sql": "select 1",
-                "dest_sql": "select 2",
-                "check_field": "input_date",
-                "reason": "需要人工确认",
-            }
-        )
-        module.build_candidate_key = mock.MagicMock(return_value="dwd::dwd.dwd_demo::cnt")
-        module.submit_backlog_items_to_form = mock.MagicMock(
-            return_value={"submitted": 1, "results": [{"candidate_key": "dwd::dwd.dwd_demo::cnt", "ok": True}]}
-        )
-        module.compute_form_payload_signature = mock.MagicMock(return_value="sig")
-        module.extract_sheet_row_number = mock.MagicMock(return_value=12)
-        module.delete_confirmation_sheet_rows = mock.MagicMock(
-            return_value={"success": True, "deleted_rows": [12], "skipped": False}
-        )
-        module.save_backlog = mock.MagicMock()
-        module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
-
-        argv_backup = sys.argv
-        stdout_backup = sys.stdout
-        sys.argv = ["run_single_quality_rule_flow.py", "--database", "dwd", "--tbl", "dwd_demo"]
-        buffer = io.StringIO()
-        sys.stdout = buffer
-        try:
-            exit_code = module.main()
-        finally:
-            sys.argv = argv_backup
-            sys.stdout = stdout_backup
-
-        self.assertEqual(exit_code, 0)
-        module.delete_confirmation_sheet_rows.assert_called_once_with([12])
-        payload_text = buffer.getvalue().split("===FULL_CHAIN_RESULT===")[1].split("===LANGFUSE_BATCH===")[0].strip()
-        payload = json.loads(payload_text)
-        self.assertEqual(payload["manual_row_delete_result"]["deleted_rows"], [12])
+        module.submit_disable_auto_generate_items_to_form.assert_called_once()
 
     def test_main_skips_generation_when_confirmation_sheet_already_has_row(self):
         module = load_module()
@@ -402,8 +279,9 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         }
         module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
         module.parse_confirmation_rows = mock.MagicMock(return_value=[existing_row])
-        module.find_latest_confirmation_row = mock.MagicMock(return_value=existing_row)
+        module.find_latest_generation_request_row = mock.MagicMock(return_value=existing_row)
         module.confirmation_row_has_submittable_sql = mock.MagicMock(return_value=True)
+        module.confirmation_row_disables_auto_generation = mock.MagicMock(return_value=False)
         module.find_latest_requested_metric_field = mock.MagicMock(return_value="total_cost")
         module.get_db_connection = mock.MagicMock()
         module.load_single_table = mock.MagicMock()
@@ -414,6 +292,7 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         module.submit_backlog_items_to_form = mock.MagicMock()
         module.save_backlog = mock.MagicMock()
         module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
+        module.submit_disable_auto_generate_items_to_form = mock.MagicMock()
 
         argv_backup = sys.argv
         stdout_backup = sys.stdout
@@ -436,6 +315,7 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         module.get_db_connection.assert_not_called()
         module.build_count_rule_candidate.assert_not_called()
         module.merge_candidates_into_backlog.assert_not_called()
+        module.submit_disable_auto_generate_items_to_form.assert_not_called()
 
     def test_main_does_not_skip_generation_for_manual_sheet_row_without_sql(self):
         module = load_module()
@@ -459,8 +339,9 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         module.load_ods_table_by_dest = mock.MagicMock(return_value={})
         module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
         module.parse_confirmation_rows = mock.MagicMock(return_value=[existing_row])
-        module.find_latest_confirmation_row = mock.MagicMock(return_value=existing_row)
+        module.find_latest_generation_request_row = mock.MagicMock(return_value=existing_row)
         module.confirmation_row_has_submittable_sql = mock.MagicMock(return_value=False)
+        module.confirmation_row_disables_auto_generation = mock.MagicMock(return_value=False)
         module.find_latest_requested_metric_field = mock.MagicMock(return_value="total_cost")
         module.build_count_rule_candidate = mock.MagicMock(
             return_value={
@@ -472,6 +353,7 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
             }
         )
         module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
+        module.submit_disable_auto_generate_items_to_form = mock.MagicMock()
 
         argv_backup = sys.argv
         stdout_backup = sys.stdout
@@ -487,6 +369,184 @@ class RunSingleQualityRuleFlowTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         module.get_db_connection.assert_called_once()
         module.build_count_rule_candidate.assert_called_once()
+        module.submit_disable_auto_generate_items_to_form.assert_not_called()
+
+    def test_main_backfills_confirmation_form_when_rule_exists_but_sheet_sql_is_blank(self):
+        module = load_module()
+
+        existing_row = {
+            "country": "ph",
+            "database": "dwd",
+            "tbl": "dwd_demo",
+            "auto_generate": "1",
+            "need_apply": "1",
+            "metric_field": "total_cost",
+            "src_sql": "",
+            "dest_sql": "",
+            "submitted_at": "2026-06-09 09:00:00",
+            "sheet_row_number": 12,
+        }
+        fake_conn = mock.MagicMock()
+        module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+        module.load_single_table = mock.MagicMock(return_value=({"tbl": "dwd_demo"}, "wattrel_etl_table_settings"))
+        module.load_quality_rules = mock.MagicMock(return_value=[])
+        module.load_ods_table_by_dest = mock.MagicMock(return_value={})
+        module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
+        module.parse_confirmation_rows = mock.MagicMock(return_value=[existing_row])
+        module.find_latest_generation_request_row = mock.MagicMock(return_value=existing_row)
+        module.confirmation_row_has_submittable_sql = mock.MagicMock(return_value=False)
+        module.confirmation_row_disables_auto_generation = mock.MagicMock(return_value=False)
+        module.find_latest_requested_metric_field = mock.MagicMock(return_value="total_cost")
+        module.build_count_rule_candidate = mock.MagicMock(
+            return_value={
+                "status": "existing",
+                "rule_name": "cnt",
+                "dest_tbl": "dwd_demo",
+                "dest_db": "dwd",
+                "src_db": "ods",
+                "src_tbl": "ods_demo",
+                "check_field": "created_at",
+                "src_sql": "select 1",
+                "dest_sql": "select 2",
+                "reason": "已存在 cnt 规则",
+            }
+        )
+        module.backlog_item_has_submittable_sql = mock.MagicMock(return_value=True)
+        module.submit_backlog_items_to_form = mock.MagicMock(
+            return_value={"submitted": 1, "results": [{"candidate_key": "dwd::dwd.dwd_demo::cnt", "ok": True}]}
+        )
+        module.compute_form_payload_signature = mock.MagicMock(return_value="sig")
+        module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
+        module.submit_disable_auto_generate_items_to_form = mock.MagicMock()
+
+        argv_backup = sys.argv
+        stdout_backup = sys.stdout
+        sys.argv = ["run_single_quality_rule_flow.py", "--database", "dwd", "--tbl", "dwd_demo"]
+        buffer = io.StringIO()
+        sys.stdout = buffer
+        try:
+            exit_code = module.main()
+        finally:
+            sys.argv = argv_backup
+            sys.stdout = stdout_backup
+
+        self.assertEqual(exit_code, 0)
+        module.submit_backlog_items_to_form.assert_called_once()
+        output = buffer.getvalue()
+        payload_text = output.split("===FULL_CHAIN_RESULT===")[1].split("===LANGFUSE_BATCH===")[0].strip()
+        payload = json.loads(payload_text)
+        self.assertEqual(payload["scan_result"]["status"], "existing")
+        self.assertEqual(payload["form_submission_items"], 1)
+        self.assertEqual(payload["form_result"]["submitted"], 1)
+        self.assertEqual(payload["backlog_item"]["src_sql"], "select 1")
+        self.assertEqual(payload["backlog_item"]["dest_sql"], "select 2")
+        module.submit_disable_auto_generate_items_to_form.assert_not_called()
+
+    def test_main_submits_disable_record_when_rule_exists_without_confirmation_row(self):
+        module = load_module()
+
+        fake_conn = mock.MagicMock()
+        module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+        module.load_single_table = mock.MagicMock(return_value=({"dest_tbl": "ods_demo"}, "wattrel_ods_table_settings"))
+        module.load_quality_rules = mock.MagicMock(return_value=[])
+        module.load_ods_table_by_dest = mock.MagicMock(return_value={})
+        module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
+        module.parse_confirmation_rows = mock.MagicMock(return_value=[])
+        module.find_latest_generation_request_row = mock.MagicMock(return_value=None)
+        module.confirmation_row_has_submittable_sql = mock.MagicMock(return_value=False)
+        module.confirmation_row_disables_auto_generation = mock.MagicMock(return_value=False)
+        module.find_latest_requested_metric_field = mock.MagicMock(return_value="")
+        module.build_count_rule_candidate = mock.MagicMock(
+            return_value={
+                "status": "existing",
+                "rule_name": "cnt",
+                "dest_tbl": "ods_demo",
+                "dest_db": "ods",
+                "src_db": "ods",
+                "src_tbl": "ods_demo_src",
+                "src_sql": "select 1",
+                "dest_sql": "select 2",
+                "reason": "已存在相关校验规则",
+            }
+        )
+        module.submit_disable_auto_generate_items_to_form = mock.MagicMock(
+            return_value={"submitted": 1, "results": [{"candidate_key": "ods::ods.ods_demo::cnt", "ok": True}]}
+        )
+        module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
+
+        argv_backup = sys.argv
+        stdout_backup = sys.stdout
+        sys.argv = ["run_single_quality_rule_flow.py", "--database", "ods", "--tbl", "ods_demo"]
+        buffer = io.StringIO()
+        sys.stdout = buffer
+        try:
+            exit_code = module.main()
+        finally:
+            sys.argv = argv_backup
+            sys.stdout = stdout_backup
+
+        self.assertEqual(exit_code, 0)
+        module.submit_disable_auto_generate_items_to_form.assert_called_once()
+        payload_text = buffer.getvalue().split("===FULL_CHAIN_RESULT===")[1].split("===LANGFUSE_BATCH===")[0].strip()
+        payload = json.loads(payload_text)
+        self.assertEqual(payload["scan_result"]["status"], "existing")
+        self.assertEqual(payload["form_submission_items"], 1)
+        self.assertEqual(payload["form_result"]["submitted"], 1)
+
+    def test_main_does_not_resubmit_disable_record_when_confirmation_row_already_closed(self):
+        module = load_module()
+
+        existing_row = {
+            "country": "ph",
+            "database": "ods",
+            "tbl": "ods_demo",
+            "auto_generate": "0",
+            "need_apply": "0",
+            "submitted_at": "2026-06-09 09:00:00",
+            "sheet_row_number": 12,
+        }
+        fake_conn = mock.MagicMock()
+        module.get_db_connection = mock.MagicMock(return_value=fake_conn)
+        module.load_single_table = mock.MagicMock(return_value=({"dest_tbl": "ods_demo"}, "wattrel_ods_table_settings"))
+        module.load_quality_rules = mock.MagicMock(return_value=[])
+        module.load_ods_table_by_dest = mock.MagicMock(return_value={})
+        module.fetch_confirmation_csv = mock.MagicMock(return_value="database,tbl,metric_field\n")
+        module.parse_confirmation_rows = mock.MagicMock(return_value=[existing_row])
+        module.find_latest_generation_request_row = mock.MagicMock(return_value=existing_row)
+        module.confirmation_row_has_submittable_sql = mock.MagicMock(return_value=False)
+        module.confirmation_row_disables_auto_generation = mock.MagicMock(return_value=True)
+        module.find_latest_requested_metric_field = mock.MagicMock(return_value="")
+        module.build_count_rule_candidate = mock.MagicMock(
+            return_value={
+                "status": "existing",
+                "rule_name": "cnt",
+                "dest_tbl": "ods_demo",
+                "dest_db": "ods",
+                "src_db": "ods",
+                "src_tbl": "ods_demo_src",
+                "src_sql": "select 1",
+                "dest_sql": "select 2",
+                "reason": "已存在相关校验规则",
+            }
+        )
+        module.submit_disable_auto_generate_items_to_form = mock.MagicMock()
+        module.submit_backlog_items_to_form = mock.MagicMock()
+        module.load_langfuse_batch = mock.MagicMock(return_value={"batch": []})
+
+        argv_backup = sys.argv
+        stdout_backup = sys.stdout
+        sys.argv = ["run_single_quality_rule_flow.py", "--database", "ods", "--tbl", "ods_demo"]
+        buffer = io.StringIO()
+        sys.stdout = buffer
+        try:
+            exit_code = module.main()
+        finally:
+            sys.argv = argv_backup
+            sys.stdout = stdout_backup
+
+        self.assertEqual(exit_code, 0)
+        module.submit_disable_auto_generate_items_to_form.assert_not_called()
+        module.submit_backlog_items_to_form.assert_not_called()
 
 
 if __name__ == "__main__":

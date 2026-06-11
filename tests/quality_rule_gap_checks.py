@@ -1007,6 +1007,15 @@ class QualityRuleGapScannerTests(unittest.TestCase):
             [
                 {
                     "database": "dwd",
+                    "tbl": "dwd_has_rule",
+                    "dest_db": "dwd",
+                    "rule_name": "cnt",
+                    "status": "existing",
+                    "reason": "告警库已存在相关校验规则，待在确认表关闭自动生成",
+                    "monitor_level": 3,
+                },
+                {
+                    "database": "dwd",
                     "tbl": "dwd_needs_rule",
                     "dest_db": "dwd",
                     "rule_name": "cnt",
