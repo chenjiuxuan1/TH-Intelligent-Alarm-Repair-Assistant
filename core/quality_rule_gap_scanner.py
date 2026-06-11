@@ -25,7 +25,7 @@ import urllib.request
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from alert.db_config import get_db_connection
-from config.config import QUALITY_RULE_FORM_CONFIG, QUALITY_RULE_VALIDATION_CONFIG
+from config.config import QUALITY_RULE_FORM_CONFIG, QUALITY_RULE_VALIDATION_CONFIG, TABLE_CONFIG
 from core.quality_rule_ai_helper import generate_rule_candidate_with_ai
 
 
@@ -97,7 +97,7 @@ def parse_git_roots(raw_value=None):
 
 
 def default_git_scan_roots():
-    country = (os.environ.get("QUALITY_RULE_FORM_COUNTRY") or "th").strip().lower()
+    country = (os.environ.get("QUALITY_RULE_FORM_COUNTRY") or "ph").strip().lower()
     candidates = [
         f"/data/git/starrocks/workflow/{country}",
         "/data/git/starrocks/workflow",
@@ -901,6 +901,42 @@ def load_quality_rules(cursor, dest_db):
     return rule_map
 
 
+def first_existing_rule(rule_map, target_table):
+    rules = rule_map.get(target_table) or {}
+    for _, rule in rules.items():
+        if rule:
+            return rule
+    return None
+
+
+def load_recent_alert_tables(cursor, databases=None):
+    databases = tuple(databases or SUPPORTED_DATABASES)
+    if not databases:
+        return set()
+
+    placeholders = ",".join(["%s"] * len(databases))
+    sql = f"""
+        SELECT dest_db, dest_tbl, src_db, src_tbl
+        FROM {TABLE_CONFIG['quality_result_table']}
+        WHERE result = 1
+          AND is_repaired = 0
+          AND (
+                dest_db IN ({placeholders})
+                OR src_db IN ({placeholders})
+              )
+    """
+    params = tuple(databases) + tuple(databases)
+    rows = fetch_rows(cursor, sql, params)
+    alert_tables = set()
+    for row in rows:
+        db_name = (row.get("dest_db") or row.get("src_db") or "").strip()
+        tbl_name = (row.get("dest_tbl") or row.get("src_tbl") or "").strip()
+        if not db_name or not tbl_name:
+            continue
+        alert_tables.add((db_name, tbl_name))
+    return alert_tables
+
+
 def load_tables(cursor, database_name, monitor_level=None):
     if database_name in ("ods", "ods_security"):
         sql = "SELECT * FROM wattrel_ods_table_settings WHERE dest_db = %s AND is_auto_check = 1"
@@ -919,13 +955,16 @@ def list_pending_generation_tables(databases=None, monitor_level=None):
     try:
         with conn.cursor() as cursor:
             items = []
+            alert_tables = load_recent_alert_tables(cursor, databases=databases)
             for database_name in databases:
                 tables = load_tables(cursor, database_name, monitor_level=monitor_level)
                 rule_map = load_quality_rules(cursor, database_name)
                 rule_name = resolve_rule_name(database_name)
                 for table in tables:
                     target_table = table["dest_tbl"] if database_name in ("ods", "ods_security") else table["tbl"]
-                    if rule_map.get(target_table, {}).get(rule_name):
+                    if (database_name, target_table) not in alert_tables:
+                        continue
+                    if first_existing_rule(rule_map, target_table):
                         continue
                     if database_name in ("ods", "ods_security"):
                         if table.get("pk") is None:
@@ -942,7 +981,7 @@ def list_pending_generation_tables(databases=None, monitor_level=None):
                             "dest_db": dest_db,
                             "rule_name": rule_name,
                             "status": "pending_generation",
-                            "reason": f"缺少 {rule_name} 规则，待进入自动生成",
+                            "reason": "告警库缺少该表相关校验语句，待进入自动生成",
                             "monitor_level": table.get("monitor_level"),
                         }
                     )
@@ -962,14 +1001,22 @@ def build_count_rule_candidate(
 ):
     target_table = table["dest_tbl"] if database_name in ("ods", "ods_security") else table["tbl"]
     requested_metric_field = normalize_requested_metric_field(requested_metric_field or table.get("requested_metric_field"))
-    existing_rule = rule_map.get(target_table, {}).get(COUNT_RULE_NAME)
+    existing_rule = first_existing_rule(rule_map, target_table)
     if existing_rule:
         return {
             "status": "existing",
-            "rule_name": COUNT_RULE_NAME,
+            "rule_name": existing_rule.get("name") or COUNT_RULE_NAME,
             "dest_tbl": target_table,
             "dest_db": existing_rule.get("dest_db") or table.get("dest_db") or table.get("db"),
-            "reason": "已存在 cnt 规则",
+            "src_db": existing_rule.get("src_db", ""),
+            "src_tbl": existing_rule.get("src_tbl", ""),
+            "check_field": existing_rule.get("check_field") or "",
+            "requested_metric_field": normalize_requested_metric_field(
+                requested_metric_field or existing_rule.get("requested_metric_field")
+            ),
+            "src_sql": existing_rule.get("src_sql", ""),
+            "dest_sql": existing_rule.get("dest_sql", ""),
+            "reason": "已存在相关校验规则",
             "rule": existing_rule,
         }
 
@@ -1545,14 +1592,22 @@ def build_exists_rule_candidate(database_name, table, rule_map, git_roots=None, 
             git_roots=git_roots,
             cursor=cursor,
         )
-    existing_rule = rule_map.get(target_table, {}).get(EXISTS_RULE_NAME)
+    existing_rule = first_existing_rule(rule_map, target_table)
     if existing_rule:
         return {
             "status": "existing",
-            "rule_name": EXISTS_RULE_NAME,
+            "rule_name": existing_rule.get("name") or EXISTS_RULE_NAME,
             "dest_tbl": target_table,
             "dest_db": existing_rule.get("dest_db") or table.get("db"),
-            "reason": "已存在 if_exists 规则",
+            "src_db": existing_rule.get("src_db", ""),
+            "src_tbl": existing_rule.get("src_tbl", ""),
+            "check_field": existing_rule.get("check_field") or "",
+            "requested_metric_field": normalize_requested_metric_field(
+                requested_metric_field or existing_rule.get("requested_metric_field")
+            ),
+            "src_sql": existing_rule.get("src_sql", ""),
+            "dest_sql": existing_rule.get("dest_sql", ""),
+            "reason": "已存在相关校验规则",
             "rule": existing_rule,
         }
 

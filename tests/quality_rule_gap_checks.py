@@ -106,7 +106,16 @@ class QualityRuleGapScannerTests(unittest.TestCase):
         table = {"db": "dwd", "tbl": "dwd_user_log"}
         rule_map = {
             "dwd_user_log": {
-                "cnt": {"name": "cnt", "dest_db": "dwd", "dest_tbl": "dwd_user_log"}
+                "cnt": {
+                    "name": "cnt",
+                    "dest_db": "dwd",
+                    "dest_tbl": "dwd_user_log",
+                    "src_db": "ods",
+                    "src_tbl": "ods_user_log",
+                    "check_field": "created_at",
+                    "src_sql": "select 1",
+                    "dest_sql": "select 2",
+                }
             }
         }
 
@@ -114,6 +123,36 @@ class QualityRuleGapScannerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "existing")
         self.assertEqual(result["rule_name"], "cnt")
+        self.assertEqual(result["reason"], "已存在相关校验规则")
+        self.assertEqual(result["src_db"], "ods")
+        self.assertEqual(result["src_tbl"], "ods_user_log")
+        self.assertEqual(result["check_field"], "created_at")
+        self.assertEqual(result["src_sql"], "select 1")
+        self.assertEqual(result["dest_sql"], "select 2")
+
+    def test_build_count_rule_candidate_returns_existing_when_any_rule_present(self):
+        module = load_module()
+        table = {"db": "dwd", "tbl": "dwd_user_log"}
+        rule_map = {
+            "dwd_user_log": {
+                "sum_total_cost": {
+                    "name": "sum_total_cost",
+                    "dest_db": "dwd",
+                    "dest_tbl": "dwd_user_log",
+                    "src_db": "ods",
+                    "src_tbl": "ods_user_log",
+                    "check_field": "created_at",
+                    "src_sql": "select 1",
+                    "dest_sql": "select 2",
+                }
+            }
+        }
+
+        result = module.build_count_rule_candidate("dwd", table, rule_map, {})
+
+        self.assertEqual(result["status"], "existing")
+        self.assertEqual(result["rule_name"], "sum_total_cost")
+        self.assertEqual(result["reason"], "已存在相关校验规则")
 
     def test_build_count_rule_candidate_generates_candidate_for_etl_table(self):
         module = load_module()
@@ -946,6 +985,10 @@ class QualityRuleGapScannerTests(unittest.TestCase):
         fake_cursor = FakeCursor(
             [
                 [
+                    {"dest_db": "dwd", "dest_tbl": "dwd_has_rule", "src_db": "ods", "src_tbl": "ods_has_rule"},
+                    {"dest_db": "dwd", "dest_tbl": "dwd_needs_rule", "src_db": "ods", "src_tbl": "ods_needs_rule"},
+                ],
+                [
                     {"id": 1, "db": "dwd", "tbl": "dwd_has_rule", "monitor_level": 3, "is_auto_check": 1},
                     {"id": 2, "db": "dwd", "tbl": "dwd_needs_rule", "monitor_level": 3, "is_auto_check": 1},
                 ],
@@ -968,8 +1011,41 @@ class QualityRuleGapScannerTests(unittest.TestCase):
                     "dest_db": "dwd",
                     "rule_name": "cnt",
                     "status": "pending_generation",
-                    "reason": "缺少 cnt 规则，待进入自动生成",
+                    "reason": "告警库缺少该表相关校验语句，待进入自动生成",
                     "monitor_level": 3,
+                }
+            ],
+        )
+
+    def test_list_pending_generation_tables_only_includes_current_alert_tables(self):
+        fake_cursor = FakeCursor(
+            [
+                [
+                    {"dest_db": "ods", "dest_tbl": "ods_online_days", "src_db": "ods", "src_tbl": "ods_online_days"},
+                ],
+                [
+                    {"dest_db": "ods", "dest_tbl": "ods_online_days", "pk": "id", "dest_tbl_partition_field": None, "monitor_level": 1},
+                    {"dest_db": "ods", "dest_tbl": "ods_arcticfox_collect_at", "pk": "id", "dest_tbl_partition_field": None, "monitor_level": 1},
+                ],
+                [],
+            ]
+        )
+        fake_conn = FakeConnection(fake_cursor)
+        module = load_module(fake_get_db_connection=mock.MagicMock(return_value=fake_conn))
+
+        results = module.list_pending_generation_tables(databases=["ods"])
+
+        self.assertEqual(
+            results,
+            [
+                {
+                    "database": "ods",
+                    "tbl": "ods_online_days",
+                    "dest_db": "ods",
+                    "rule_name": "cnt",
+                    "status": "pending_generation",
+                    "reason": "告警库缺少该表相关校验语句，待进入自动生成",
+                    "monitor_level": 1,
                 }
             ],
         )
@@ -977,6 +1053,11 @@ class QualityRuleGapScannerTests(unittest.TestCase):
     def test_list_pending_generation_tables_skips_ineligible_ods_tables(self):
         fake_cursor = FakeCursor(
             [
+                [
+                    {"dest_db": "ods", "dest_tbl": "ods_no_pk", "src_db": "ods", "src_tbl": "ods_no_pk"},
+                    {"dest_db": "ods", "dest_tbl": "ods_partitioned", "src_db": "ods", "src_tbl": "ods_partitioned"},
+                    {"dest_db": "ods", "dest_tbl": "ods_ok", "src_db": "ods", "src_tbl": "ods_ok"},
+                ],
                 [
                     {"dest_db": "ods", "dest_tbl": "ods_no_pk", "pk": None, "dest_tbl_partition_field": None, "monitor_level": 1},
                     {"dest_db": "ods", "dest_tbl": "ods_partitioned", "pk": "id", "dest_tbl_partition_field": "dt", "monitor_level": 1},
@@ -999,7 +1080,7 @@ class QualityRuleGapScannerTests(unittest.TestCase):
                     "dest_db": "ods",
                     "rule_name": "cnt",
                     "status": "pending_generation",
-                    "reason": "缺少 cnt 规则，待进入自动生成",
+                    "reason": "告警库缺少该表相关校验语句，待进入自动生成",
                     "monitor_level": 2,
                 }
             ],
@@ -1038,7 +1119,7 @@ class QualityRuleGapScannerTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(mocked_scan.call_args.args[0], ["foo_bar"])
-        self.assertIn('\"database\": \"foo_bar\"', stdout.getvalue())
+        self.assertIn('"database": "foo_bar"', stdout.getvalue())
 
     def test_apply_candidates_inserts_only_candidate_rules(self):
         fake_cursor = FakeCursor([[], []])
