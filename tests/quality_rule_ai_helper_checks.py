@@ -543,6 +543,10 @@ class QualityRuleAiHelperTests(unittest.TestCase):
         self.assertEqual(generation_body["promptTokens"], 123)
         self.assertEqual(generation_body["completionTokens"], 45)
         self.assertEqual(generation_body["totalTokens"], 168)
+        self.assertEqual(
+            generation_body["usageDetails"],
+            {"input": 123, "output": 45, "total": 168, "unit": "TOKENS"},
+        )
 
     def test_parse_completion_response_accepts_legacy_string_and_usage_payload(self):
         text, usage = module.parse_completion_response("plain text")

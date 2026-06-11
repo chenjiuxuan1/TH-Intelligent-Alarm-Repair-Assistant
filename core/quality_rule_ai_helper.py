@@ -503,6 +503,12 @@ def build_langfuse_ingestion_batch(messages, response_text, parsed_output, usage
         generation_body["promptTokens"] = normalized_usage.get("prompt_tokens", 0)
         generation_body["completionTokens"] = normalized_usage.get("completion_tokens", 0)
         generation_body["totalTokens"] = normalized_usage.get("total_tokens", 0)
+        generation_body["usageDetails"] = {
+            "input": normalized_usage.get("prompt_tokens", 0),
+            "output": normalized_usage.get("completion_tokens", 0),
+            "total": normalized_usage.get("total_tokens", 0),
+            "unit": "TOKENS",
+        }
     return {
         "batch": [
             {
