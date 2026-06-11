@@ -96,7 +96,7 @@ def _run_with_deadline(fn, *args, **kwargs):
 
 
 def default_git_scan_roots():
-    country = (os.environ.get("QUALITY_RULE_FORM_COUNTRY") or "th").strip().lower()
+    country = (os.environ.get("QUALITY_RULE_FORM_COUNTRY") or "ph").strip().lower()
     candidates = [
         f"/data/git/starrocks/workflow/{country}",
         "/data/git/starrocks/workflow",
@@ -403,7 +403,7 @@ def extract_json_object(text):
         raise
 
 
-def maybe_trace_langfuse(messages, response_text, parsed_output):
+def maybe_trace_langfuse(messages, response_text, parsed_output, usage=None):
     secret_key = QUALITY_RULE_AI_CONFIG.get("langfuse_secret_key")
     public_key = QUALITY_RULE_AI_CONFIG.get("langfuse_public_key")
     host = QUALITY_RULE_AI_CONFIG.get("langfuse_base_url")
@@ -411,7 +411,7 @@ def maybe_trace_langfuse(messages, response_text, parsed_output):
         return False
     # Use the HTTP ingestion path consistently. The SDK flush path can block
     # indefinitely on some remote hosts, which makes rule generation appear hung.
-    return trace_langfuse_via_http(messages, response_text, parsed_output)
+    return trace_langfuse_via_http(messages, response_text, parsed_output, usage=usage)
 
 
 def sanitize_messages_for_langfuse(messages):
@@ -450,11 +450,59 @@ def sanitize_messages_for_langfuse(messages):
     return sanitized
 
 
-def build_langfuse_ingestion_batch(messages, response_text, parsed_output):
+def normalize_langfuse_usage(raw_usage):
+    if raw_usage in ("", None):
+        return {}
+
+    if isinstance(raw_usage, dict):
+        prompt_tokens = raw_usage.get("prompt_tokens")
+        completion_tokens = raw_usage.get("completion_tokens")
+        total_tokens = raw_usage.get("total_tokens")
+    else:
+        prompt_tokens = getattr(raw_usage, "prompt_tokens", None)
+        completion_tokens = getattr(raw_usage, "completion_tokens", None)
+        total_tokens = getattr(raw_usage, "total_tokens", None)
+
+    normalized = {}
+    for key, value in (
+        ("prompt_tokens", prompt_tokens),
+        ("completion_tokens", completion_tokens),
+        ("total_tokens", total_tokens),
+    ):
+        try:
+            if value is not None:
+                normalized[key] = int(value)
+        except Exception:
+            continue
+
+    if "total_tokens" not in normalized:
+        prompt = normalized.get("prompt_tokens")
+        completion = normalized.get("completion_tokens")
+        if prompt is not None or completion is not None:
+            normalized["total_tokens"] = int(prompt or 0) + int(completion or 0)
+
+    return normalized
+
+
+def build_langfuse_ingestion_batch(messages, response_text, parsed_output, usage=None):
     trace_id = uuid.uuid4().hex
     generation_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     observation_messages = sanitize_messages_for_langfuse(messages)
+    normalized_usage = normalize_langfuse_usage(usage)
+    generation_body = {
+        "id": generation_id,
+        "traceId": trace_id,
+        "name": "generate_quality_rule_candidate",
+        "model": QUALITY_RULE_AI_CONFIG.get("model"),
+        "input": observation_messages,
+        "output": response_text,
+        "metadata": {"parsed_output": parsed_output},
+    }
+    if normalized_usage:
+        generation_body["promptTokens"] = normalized_usage.get("prompt_tokens", 0)
+        generation_body["completionTokens"] = normalized_usage.get("completion_tokens", 0)
+        generation_body["totalTokens"] = normalized_usage.get("total_tokens", 0)
     return {
         "batch": [
             {
@@ -472,15 +520,7 @@ def build_langfuse_ingestion_batch(messages, response_text, parsed_output):
                 "id": uuid.uuid4().hex,
                 "timestamp": now,
                 "type": "generation-create",
-                "body": {
-                    "id": generation_id,
-                    "traceId": trace_id,
-                    "name": "generate_quality_rule_candidate",
-                    "model": QUALITY_RULE_AI_CONFIG.get("model"),
-                    "input": observation_messages,
-                    "output": response_text,
-                    "metadata": {"parsed_output": parsed_output},
-                },
+                "body": generation_body,
             },
         ]
     }
@@ -496,7 +536,7 @@ def export_langfuse_ingestion_batch(batch, export_path):
     return str(path)
 
 
-def trace_langfuse_via_http(messages, response_text, parsed_output):
+def trace_langfuse_via_http(messages, response_text, parsed_output, usage=None):
     global _LAST_LANGFUSE_TRACE_ERROR
     secret_key = QUALITY_RULE_AI_CONFIG.get("langfuse_secret_key")
     public_key = QUALITY_RULE_AI_CONFIG.get("langfuse_public_key")
@@ -506,7 +546,7 @@ def trace_langfuse_via_http(messages, response_text, parsed_output):
         return False
 
     basic = base64.b64encode(f"{public_key}:{secret_key}".encode("utf-8")).decode("ascii")
-    batch = build_langfuse_ingestion_batch(messages, response_text, parsed_output)
+    batch = build_langfuse_ingestion_batch(messages, response_text, parsed_output, usage=usage)
     req = urllib.request.Request(
         f"{host}/api/public/ingestion",
         data=json.dumps(batch, ensure_ascii=True).encode("utf-8"),
@@ -579,10 +619,12 @@ def request_openai_compatible_completion_via_sdk(messages):
     if message is None and isinstance(choice, dict):
         message = choice.get("message")
     if message is None:
-        return ""
+        return {"content": "", "usage": normalize_langfuse_usage(getattr(completion, "usage", None))}
     if isinstance(message, dict):
-        return message.get("content") or ""
-    return getattr(message, "content", "") or ""
+        content = message.get("content") or ""
+    else:
+        content = getattr(message, "content", "") or ""
+    return {"content": content, "usage": normalize_langfuse_usage(getattr(completion, "usage", None))}
 
 
 def request_openai_compatible_completion_via_http(messages):
@@ -623,9 +665,12 @@ def request_openai_compatible_completion_via_http(messages):
     parsed = json.loads(body)
     choices = parsed.get("choices") or []
     if not choices:
-        return ""
+        return {"content": "", "usage": normalize_langfuse_usage(parsed.get("usage"))}
     message = choices[0].get("message") or {}
-    return message.get("content") or ""
+    return {
+        "content": message.get("content") or "",
+        "usage": normalize_langfuse_usage(parsed.get("usage")),
+    }
 
 
 def request_openai_compatible_completion(messages):
@@ -636,6 +681,15 @@ def request_openai_compatible_completion(messages):
             return request_openai_compatible_completion_via_http(messages)
         except Exception as http_exc:
             raise RuntimeError(f"sdk_error={sdk_exc}; http_error={http_exc}") from http_exc
+
+
+def parse_completion_response(response):
+    if isinstance(response, dict):
+        return (
+            response.get("content") or "",
+            normalize_langfuse_usage(response.get("usage")),
+        )
+    return response or "", {}
 
 
 def source_field_is_verified(field_name, table, git_context):
@@ -751,13 +805,14 @@ def generate_rule_candidate_with_ai(database_name, table, failure_reason, git_ro
     meta["attempted"] = True
     meta["status"] = "requested"
     try:
-        response_text = _run_with_deadline(request_openai_compatible_completion, messages)
+        response = _run_with_deadline(request_openai_compatible_completion, messages)
+        response_text, usage = parse_completion_response(response)
     except AiRequestTimeoutError as exc:
         meta["status"] = "ai_request_timeout"
         meta["reason"] = str(exc)
         _ai_debug(f"ai request timeout: {exc}")
         try:
-            maybe_trace_langfuse(messages, "", {"status": "ai_request_timeout", "reason": str(exc)})
+            maybe_trace_langfuse(messages, "", {"status": "ai_request_timeout", "reason": str(exc)}, usage=None)
         except Exception:
             pass
         return (None, meta) if return_meta else None
@@ -766,7 +821,7 @@ def generate_rule_candidate_with_ai(database_name, table, failure_reason, git_ro
         meta["reason"] = str(exc)
         _ai_debug(f"ai request failed: {exc}")
         try:
-            maybe_trace_langfuse(messages, "", {"status": "ai_request_failed", "reason": str(exc)})
+            maybe_trace_langfuse(messages, "", {"status": "ai_request_failed", "reason": str(exc)}, usage=None)
         except Exception:
             pass
         return (None, meta) if return_meta else None
@@ -781,13 +836,15 @@ def generate_rule_candidate_with_ai(database_name, table, failure_reason, git_ro
     meta["draft_candidate"] = draft_candidate
     _LAST_LANGFUSE_TRACE_ERROR = ""
     export_path = os.environ.get("QUALITY_RULE_LANGFUSE_EXPORT_PATH", "").strip()
-    traced = maybe_trace_langfuse(messages, response_text, parsed)
+    traced = maybe_trace_langfuse(messages, response_text, parsed, usage=usage)
     meta["trace_status"] = "ok" if traced else "langfuse_trace_failed"
+    if usage:
+        meta["usage"] = usage
     if not traced:
         meta["trace_reason"] = _LAST_LANGFUSE_TRACE_ERROR or "Langfuse trace 未成功写入"
         _ai_debug(f"langfuse trace failed: {meta['trace_reason']}")
         if export_path:
-            batch = build_langfuse_ingestion_batch(messages, response_text, parsed)
+            batch = build_langfuse_ingestion_batch(messages, response_text, parsed, usage=usage)
             meta["trace_export_path"] = export_langfuse_ingestion_batch(batch, export_path)
     else:
         _ai_debug("langfuse trace ok")

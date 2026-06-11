@@ -529,3 +529,34 @@ class QualityRuleAiHelperTests(unittest.TestCase):
             sorted(trace_payload.keys()),
             sorted(["task", "database", "dest_db", "dest_tbl", "src_db", "src_tbl", "failure_reason", "validation_feedback", "git_context"]),
         )
+
+    def test_build_langfuse_ingestion_batch_includes_token_usage(self):
+        batch = module.build_langfuse_ingestion_batch(
+            [{"role": "user", "content": "hi"}],
+            '{"ok": true}',
+            {"ok": True},
+            usage={"prompt_tokens": 123, "completion_tokens": 45},
+        )
+
+        generation_body = batch["batch"][1]["body"]
+
+        self.assertEqual(generation_body["promptTokens"], 123)
+        self.assertEqual(generation_body["completionTokens"], 45)
+        self.assertEqual(generation_body["totalTokens"], 168)
+
+    def test_parse_completion_response_accepts_legacy_string_and_usage_payload(self):
+        text, usage = module.parse_completion_response("plain text")
+        self.assertEqual(text, "plain text")
+        self.assertEqual(usage, {})
+
+        text, usage = module.parse_completion_response(
+            {
+                "content": "json text",
+                "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+            }
+        )
+        self.assertEqual(text, "json text")
+        self.assertEqual(
+            usage,
+            {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
+        )
