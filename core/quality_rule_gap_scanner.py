@@ -278,6 +278,45 @@ def enrich_etl_table_info(table, ods_table_by_dest, git_roots=None):
     return table, None
 
 
+def build_ods_source_db_name(ods_db_row):
+    if not ods_db_row:
+        return ""
+    catalog = str(ods_db_row.get("catalog") or "").strip()
+    database_name = str(ods_db_row.get("db") or "").strip()
+    if catalog and database_name:
+        return f"{catalog}.{database_name}"
+    return database_name or catalog
+
+
+def enrich_ods_table_info(table, ods_db_by_id):
+    table = deepcopy(table)
+    table["dest_db"] = table.get("dest_db") or table.get("db") or ""
+
+    raw_src_tbl = str(table.get("src_tbl") or "").strip()
+    if not raw_src_tbl:
+        return None, "ODS 表缺少 src_tbl 配置"
+    table["src_tbl"] = raw_src_tbl
+
+    src_db_id = table.get("src_db_id")
+    if src_db_id in (None, ""):
+        return None, "ODS 表缺少 src_db_id 配置"
+
+    ods_db_row = ods_db_by_id.get(str(src_db_id)) or ods_db_by_id.get(src_db_id)
+    if not ods_db_row:
+        return None, f"未在 wattrel_ods_db_settings 中查到 src_db_id={src_db_id} 的配置"
+
+    source_db_name = build_ods_source_db_name(ods_db_row)
+    if not source_db_name:
+        return None, f"src_db_id={src_db_id} 缺少 catalog/db 配置"
+
+    table["src_db"] = source_db_name
+    table["src_catalog"] = ods_db_row.get("catalog") or ""
+    table["src_physical_db"] = ods_db_row.get("db") or ""
+    table["source_columns"] = parse_json_list(table.get("columns"))
+    table["origin_src_tbl"] = raw_src_tbl
+    return table, None
+
+
 def infer_source_check_field(table, git_roots=None):
     dest_db = table.get("dest_db")
     if dest_db in ("ods", "ods_security"):
@@ -889,6 +928,18 @@ def load_ods_table_by_dest(cursor):
     return {row["dest_tbl"]: row for row in rows if row.get("dest_tbl")}
 
 
+def load_ods_db_by_id(cursor):
+    rows = fetch_rows(cursor, "SELECT * FROM wattrel_ods_db_settings")
+    result = {}
+    for row in rows:
+        row_id = row.get("id")
+        if row_id in (None, ""):
+            continue
+        result[row_id] = row
+        result[str(row_id)] = row
+    return result
+
+
 def load_quality_rules(cursor, dest_db):
     rows = fetch_rows(
         cursor,
@@ -1007,6 +1058,7 @@ def build_count_rule_candidate(
     table,
     rule_map,
     ods_table_by_dest,
+    ods_db_by_id=None,
     git_roots=None,
     cursor=None,
     requested_metric_field=None,
@@ -1049,7 +1101,37 @@ def build_count_rule_candidate(
                 "dest_db": table.get("dest_db"),
                 "reason": "ODS 分区表，wattrel 原逻辑跳过",
             }
-        working_table = deepcopy(table)
+        working_table, enrich_error = enrich_ods_table_info(table, ods_db_by_id or {})
+        if working_table is None:
+            ai_table = enrich_ai_schema_context(
+                {
+                    **table,
+                    "dest_tbl": target_table,
+                    "dest_db": table.get("dest_db") or database_name,
+                    "requested_metric_field": requested_metric_field,
+                },
+                cursor=cursor,
+            )
+            ai_candidate, ai_meta = call_ai_candidate(database_name, ai_table, enrich_error, git_roots=git_roots)
+            if ai_candidate:
+                return finalize_candidate_with_validation(
+                    database_name,
+                    target_table,
+                    ai_candidate.get("dest_db") or table.get("dest_db") or database_name,
+                    ai_candidate,
+                    ai_table,
+                    git_roots=git_roots,
+                    cursor=cursor,
+                    base_reason=f"AI 兜底生成规则: {ai_candidate.get('ai_reason', enrich_error)}",
+                    ai_status=ai_meta.get("status", ""),
+                )
+            return blocked_result_with_ai_draft(
+                ai_table,
+                target_table,
+                table.get("dest_db") or database_name,
+                ai_meta,
+                enrich_error,
+            )
     else:
         working_table, enrich_error = enrich_etl_table_info(table, ods_table_by_dest, git_roots=git_roots)
         if working_table is None:
@@ -1691,6 +1773,7 @@ def scan_database_rules(cursor, database_name, monitor_level=None, git_roots=Non
     tables = load_tables(cursor, database_name, monitor_level=monitor_level)
     rule_map = load_quality_rules(cursor, database_name)
     ods_table_by_dest = load_ods_table_by_dest(cursor) if database_name not in EXISTS_RULE_DATABASES else {}
+    ods_db_by_id = load_ods_db_by_id(cursor) if database_name in ("ods", "ods_security") else {}
 
     results = []
     for table in tables:
@@ -1702,6 +1785,7 @@ def scan_database_rules(cursor, database_name, monitor_level=None, git_roots=Non
                 table,
                 rule_map,
                 ods_table_by_dest,
+                ods_db_by_id=ods_db_by_id,
                 git_roots=git_roots,
                 cursor=cursor,
             )

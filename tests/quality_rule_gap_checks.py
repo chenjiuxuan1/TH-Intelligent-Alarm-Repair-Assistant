@@ -182,6 +182,40 @@ class QualityRuleGapScannerTests(unittest.TestCase):
         self.assertEqual(result["candidate"]["src_check_field"], "created_at")
         self.assertIn("SELECT COUNT(*)", result["candidate"]["src_sql"])
 
+    def test_build_count_rule_candidate_generates_candidate_for_ods_table_with_catalog_source(self):
+        module = load_module()
+        table = {
+            "id": 173,
+            "src_db_id": 5,
+            "src_tbl": "withhold_detail_his",
+            "dest_db": "ods",
+            "dest_tbl": "ods_repay_withhold_detail_his",
+            "dest_tbl_partition_field": None,
+            "pk": "withhold_detail_his_id",
+            "columns": json.dumps(
+                [
+                    "withhold_detail_his_id",
+                    "withhold_detail_create_at",
+                    "withhold_detail_his_create_at",
+                ]
+            ),
+            "check_field": "withhold_detail_his_create_at",
+        }
+        ods_db_by_id = {
+            5: {"id": 5, "catalog": "biz_catalog", "db": "repay"},
+            "5": {"id": 5, "catalog": "biz_catalog", "db": "repay"},
+        }
+
+        result = module.build_count_rule_candidate("ods", table, {}, {}, ods_db_by_id=ods_db_by_id)
+
+        self.assertEqual(result["status"], "candidate")
+        self.assertEqual(result["candidate"]["src_db"], "biz_catalog.repay")
+        self.assertEqual(result["candidate"]["src_tbl"], "withhold_detail_his")
+        self.assertEqual(result["candidate"]["src_check_field"], "withhold_detail_his_create_at")
+        self.assertEqual(result["candidate"]["dest_check_field"], "withhold_detail_his_create_at")
+        self.assertIn("FROM biz_catalog.repay.`withhold_detail_his`", result["candidate"]["src_sql"])
+        self.assertIn("FROM ods.ods_repay_withhold_detail_his", result["candidate"]["dest_sql"])
+
     def test_build_count_rule_candidate_blocks_when_check_fields_differ(self):
         module = load_module()
         table = {

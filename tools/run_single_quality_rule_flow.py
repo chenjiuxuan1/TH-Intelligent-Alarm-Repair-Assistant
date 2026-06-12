@@ -33,6 +33,7 @@ from core.quality_rule_gap_scanner import (
     EXISTS_RULE_DATABASES,
     build_exists_rule_candidate,
     build_count_rule_candidate,
+    load_ods_db_by_id,
     default_git_scan_roots,
     load_ods_table_by_dest,
     load_quality_rules,
@@ -193,12 +194,15 @@ def main():
             )
         else:
             ods_map = load_ods_table_by_dest(cur)
+            ods_db_by_id = load_ods_db_by_id(cur) if database in {"ods", "ods_security"} else {}
             raw_result = build_count_rule_candidate(
                 database,
                 table,
                 rules,
                 ods_map,
+                ods_db_by_id=ods_db_by_id,
                 git_roots=git_roots,
+                cursor=cur,
                 requested_metric_field=requested_metric_field,
             )
     finally:
