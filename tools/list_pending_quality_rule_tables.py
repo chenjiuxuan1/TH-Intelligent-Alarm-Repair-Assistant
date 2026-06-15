@@ -108,6 +108,7 @@ def extract_manual_pending_rows(confirmation_rows, target_country):
                 "status": "pending_generation",
                 "reason": "Google 确认表手动录入，待自动生成",
                 "source": "confirmation_sheet",
+                "requested_metric_field": (row.get("metric_field") or "").strip(),
             }
         )
     return manual_items
@@ -115,13 +116,18 @@ def extract_manual_pending_rows(confirmation_rows, target_country):
 
 def merge_pending_items(scanned_items, manual_items):
     merged = []
-    seen = set()
+    index_by_key = {}
     for item in list(scanned_items or []) + list(manual_items or []):
         key = ((item.get("database") or "").strip(), (item.get("tbl") or "").strip())
-        if not all(key) or key in seen:
+        if not all(key):
             continue
-        seen.add(key)
-        merged.append(item)
+        existing_index = index_by_key.get(key)
+        if existing_index is None:
+            index_by_key[key] = len(merged)
+            merged.append(item)
+            continue
+        if item.get("source") == "confirmation_sheet":
+            merged[existing_index] = item
     return merged
 
 

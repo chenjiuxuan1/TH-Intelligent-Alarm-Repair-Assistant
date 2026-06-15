@@ -174,6 +174,7 @@ class ListPendingQualityRuleTablesChecks(unittest.TestCase):
                     "status": "pending_generation",
                     "reason": "Google 确认表手动录入，待自动生成",
                     "source": "confirmation_sheet",
+                    "requested_metric_field": "",
                 }
             ],
         )
@@ -204,6 +205,7 @@ class ListPendingQualityRuleTablesChecks(unittest.TestCase):
                     "status": "pending_generation",
                     "reason": "Google 确认表手动录入，待自动生成",
                     "source": "confirmation_sheet",
+                    "requested_metric_field": "",
                 }
             ],
         )
@@ -302,6 +304,45 @@ class ListPendingQualityRuleTablesChecks(unittest.TestCase):
                     "status": "pending_generation",
                     "reason": "Google 确认表手动录入，待自动生成",
                     "source": "confirmation_sheet",
+                    "requested_metric_field": "",
+                }
+            ],
+        )
+
+    def test_merge_pending_items_prefers_manual_confirmation_request(self):
+        module = load_module()
+
+        results = module.merge_pending_items(
+            [
+                {
+                    "database": "dwd",
+                    "tbl": "dwd_user_log",
+                    "status": "existing",
+                    "reason": "告警库已存在相关校验规则，待在确认表关闭自动生成",
+                }
+            ],
+            [
+                {
+                    "database": "dwd",
+                    "tbl": "dwd_user_log",
+                    "status": "pending_generation",
+                    "reason": "Google 确认表手动录入，待自动生成",
+                    "source": "confirmation_sheet",
+                    "requested_metric_field": "total_cost",
+                }
+            ],
+        )
+
+        self.assertEqual(
+            results,
+            [
+                {
+                    "database": "dwd",
+                    "tbl": "dwd_user_log",
+                    "status": "pending_generation",
+                    "reason": "Google 确认表手动录入，待自动生成",
+                    "source": "confirmation_sheet",
+                    "requested_metric_field": "total_cost",
                 }
             ],
         )

@@ -952,10 +952,61 @@ def load_quality_rules(cursor, dest_db):
     return rule_map
 
 
+def normalize_sql_text(value):
+    return str(value or "").strip().lower()
+
+
+def sql_mentions_field(sql_text, field_name):
+    normalized_field = (field_name or "").strip().lower()
+    if not normalized_field:
+        return False
+    return re.search(rf"\b{re.escape(normalized_field)}\b", normalize_sql_text(sql_text)) is not None
+
+
+def infer_existing_rule_kind(rule):
+    rule_name = (rule.get("name") or "").strip().lower()
+    src_sql = normalize_sql_text(rule.get("src_sql"))
+    dest_sql = normalize_sql_text(rule.get("dest_sql"))
+    combined_sql = f"{src_sql}\n{dest_sql}"
+
+    if rule_name == EXISTS_RULE_NAME or " as if_exists" in combined_sql:
+        return "if_exists"
+    if "sum(" in combined_sql or "avg(" in combined_sql or "max(" in combined_sql or "min(" in combined_sql:
+        return "metric"
+    if "count(" in combined_sql:
+        return "count"
+    if rule_name == COUNT_RULE_NAME:
+        return "count"
+    return "metric"
+
+
+def existing_rule_matches_request(rule, default_rule_name, requested_metric_field=""):
+    requested_metric_field = normalize_requested_metric_field(requested_metric_field)
+    if requested_metric_field:
+        return (
+            sql_mentions_field(rule.get("src_sql"), requested_metric_field)
+            or sql_mentions_field(rule.get("dest_sql"), requested_metric_field)
+            or (rule.get("check_field") or "").strip().lower() == requested_metric_field.lower()
+        )
+
+    expected_kind = "if_exists" if default_rule_name == EXISTS_RULE_NAME else "count"
+    return infer_existing_rule_kind(rule) == expected_kind
+
+
 def first_existing_rule(rule_map, target_table):
     rules = rule_map.get(target_table) or {}
     for _, rule in rules.items():
         if rule:
+            return rule
+    return None
+
+
+def find_matching_existing_rule(rule_map, target_table, default_rule_name, requested_metric_field=""):
+    rules = rule_map.get(target_table) or {}
+    for _, rule in rules.items():
+        if not rule:
+            continue
+        if existing_rule_matches_request(rule, default_rule_name, requested_metric_field=requested_metric_field):
             return rule
     return None
 
@@ -1015,7 +1066,7 @@ def list_pending_generation_tables(databases=None, monitor_level=None):
                     target_table = table["dest_tbl"] if database_name in ("ods", "ods_security") else table["tbl"]
                     if (database_name, target_table) not in alert_tables:
                         continue
-                    existing_rule = first_existing_rule(rule_map, target_table)
+                    existing_rule = find_matching_existing_rule(rule_map, target_table, rule_name)
                     if existing_rule:
                         items.append(
                             {
@@ -1065,7 +1116,12 @@ def build_count_rule_candidate(
 ):
     target_table = table["dest_tbl"] if database_name in ("ods", "ods_security") else table["tbl"]
     requested_metric_field = normalize_requested_metric_field(requested_metric_field or table.get("requested_metric_field"))
-    existing_rule = first_existing_rule(rule_map, target_table)
+    existing_rule = find_matching_existing_rule(
+        rule_map,
+        target_table,
+        COUNT_RULE_NAME,
+        requested_metric_field=requested_metric_field,
+    )
     if existing_rule:
         return {
             "status": "existing",
@@ -1686,7 +1742,12 @@ def build_exists_rule_candidate(database_name, table, rule_map, git_roots=None, 
             git_roots=git_roots,
             cursor=cursor,
         )
-    existing_rule = first_existing_rule(rule_map, target_table)
+    existing_rule = find_matching_existing_rule(
+        rule_map,
+        target_table,
+        EXISTS_RULE_NAME,
+        requested_metric_field=requested_metric_field,
+    )
     if existing_rule:
         return {
             "status": "existing",

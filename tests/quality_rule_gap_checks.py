@@ -130,7 +130,7 @@ class QualityRuleGapScannerTests(unittest.TestCase):
         self.assertEqual(result["src_sql"], "select 1")
         self.assertEqual(result["dest_sql"], "select 2")
 
-    def test_build_count_rule_candidate_returns_existing_when_any_rule_present(self):
+    def test_build_count_rule_candidate_returns_existing_when_requested_metric_matches_existing_rule(self):
         module = load_module()
         table = {"db": "dwd", "tbl": "dwd_user_log"}
         rule_map = {
@@ -141,18 +141,114 @@ class QualityRuleGapScannerTests(unittest.TestCase):
                     "dest_tbl": "dwd_user_log",
                     "src_db": "ods",
                     "src_tbl": "ods_user_log",
-                    "check_field": "created_at",
-                    "src_sql": "select 1",
-                    "dest_sql": "select 2",
+                    "check_field": "total_cost",
+                    "src_sql": "SELECT COALESCE(ROUND(SUM(order_amount), 6), 0) AS cnt FROM ods.ods_user_log WHERE created_at >= '{begin}' AND created_at < '{end}'",
+                    "dest_sql": "SELECT COALESCE(ROUND(SUM(total_cost), 6), 0) AS cnt FROM dwd.dwd_user_log WHERE created_at >= '{begin}' AND created_at < '{end}'",
                 }
             }
         }
 
-        result = module.build_count_rule_candidate("dwd", table, rule_map, {})
+        result = module.build_count_rule_candidate(
+            "dwd",
+            table,
+            rule_map,
+            {},
+            requested_metric_field="total_cost",
+        )
 
         self.assertEqual(result["status"], "existing")
         self.assertEqual(result["rule_name"], "sum_total_cost")
         self.assertEqual(result["reason"], "已存在相关校验规则")
+
+    def test_build_count_rule_candidate_does_not_treat_metric_rule_as_existing_for_default_count(self):
+        module = load_module()
+        table = {
+            "id": 1,
+            "db": "dwd",
+            "tbl": "dwd_user_log",
+            "dep_tbls": json.dumps(["ods_user_log"]),
+            "increment_field": "created_at",
+            "check_field": "",
+        }
+        ods_table_by_dest = {
+            "ods_user_log": {
+                "dest_tbl": "ods_user_log",
+                "check_field": "",
+                "columns": json.dumps(["id", "created_at", "other_field"]),
+                "src_tbl": "user_log",
+            }
+        }
+        rule_map = {
+            "dwd_user_log": {
+                "cnt": {
+                    "name": "cnt",
+                    "dest_db": "dwd",
+                    "dest_tbl": "dwd_user_log",
+                    "src_db": "ods",
+                    "src_tbl": "ods_user_log",
+                    "check_field": "created_at",
+                    "src_sql": "SELECT COALESCE(ROUND(SUM(order_amount), 6), 0) AS cnt FROM ods.ods_user_log WHERE created_at >= '{begin}' AND created_at < '{end}'",
+                    "dest_sql": "SELECT COALESCE(ROUND(SUM(total_amount), 6), 0) AS cnt FROM dwd.dwd_user_log WHERE created_at >= '{begin}' AND created_at < '{end}'",
+                }
+            }
+        }
+
+        result = module.build_count_rule_candidate("dwd", table, rule_map, ods_table_by_dest)
+
+        self.assertEqual(result["status"], "candidate")
+
+    def test_build_count_rule_candidate_treats_requested_metric_field_as_distinct_type(self):
+        module = load_module()
+        table = {
+            "id": 1,
+            "db": "dwd",
+            "tbl": "dwd_user_log",
+            "dep_tbls": json.dumps(["ods_user_log"]),
+            "increment_field": "created_at",
+            "check_field": "",
+        }
+        ods_table_by_dest = {
+            "ods_user_log": {
+                "dest_tbl": "ods_user_log",
+                "check_field": "",
+                "columns": json.dumps(["id", "created_at", "order_amount"]),
+                "src_tbl": "user_log",
+            }
+        }
+        rule_map = {
+            "dwd_user_log": {
+                "cnt": {
+                    "name": "cnt",
+                    "dest_db": "dwd",
+                    "dest_tbl": "dwd_user_log",
+                    "src_db": "ods",
+                    "src_tbl": "ods_user_log",
+                    "check_field": "created_at",
+                    "src_sql": "SELECT COUNT(*) AS cnt FROM ods.ods_user_log WHERE created_at >= '{begin}' AND created_at < '{end}'",
+                    "dest_sql": "SELECT COUNT(*) AS cnt FROM dwd.dwd_user_log WHERE created_at >= '{begin}' AND created_at < '{end}'",
+                }
+            }
+        }
+
+        with mock.patch.object(module, "build_requested_metric_candidate_with_ai") as mocked_builder:
+            mocked_builder.return_value = {
+                "status": "candidate",
+                "rule_name": "cnt",
+                "dest_tbl": "dwd_user_log",
+                "dest_db": "dwd",
+                "reason": "确认表指定字段 total_amount，按指定字段生成规则",
+                "candidate": {"requested_metric_field": "total_amount"},
+            }
+            result = module.build_count_rule_candidate(
+                "dwd",
+                table,
+                rule_map,
+                ods_table_by_dest,
+                requested_metric_field="total_amount",
+            )
+
+        self.assertEqual(result["status"], "candidate")
+        mocked_builder.assert_called_once()
 
     def test_build_count_rule_candidate_generates_candidate_for_etl_table(self):
         module = load_module()
@@ -1051,6 +1147,46 @@ class QualityRuleGapScannerTests(unittest.TestCase):
                 {
                     "database": "dwd",
                     "tbl": "dwd_needs_rule",
+                    "dest_db": "dwd",
+                    "rule_name": "cnt",
+                    "status": "pending_generation",
+                    "reason": "告警库缺少该表相关校验语句，待进入自动生成",
+                    "monitor_level": 3,
+                }
+            ],
+        )
+
+    def test_list_pending_generation_tables_does_not_skip_when_only_metric_rule_exists(self):
+        fake_cursor = FakeCursor(
+            [
+                [
+                    {"dest_db": "dwd", "dest_tbl": "dwd_has_metric_rule", "src_db": "ods", "src_tbl": "ods_has_metric_rule"},
+                ],
+                [
+                    {"id": 1, "db": "dwd", "tbl": "dwd_has_metric_rule", "monitor_level": 3, "is_auto_check": 1},
+                ],
+                [
+                    {
+                        "dest_db": "dwd",
+                        "dest_tbl": "dwd_has_metric_rule",
+                        "name": "cnt",
+                        "src_sql": "SELECT COALESCE(ROUND(SUM(order_amount), 6), 0) AS cnt FROM ods.ods_has_metric_rule",
+                        "dest_sql": "SELECT COALESCE(ROUND(SUM(total_amount), 6), 0) AS cnt FROM dwd.dwd_has_metric_rule",
+                    },
+                ],
+            ]
+        )
+        fake_conn = FakeConnection(fake_cursor)
+        module = load_module(fake_get_db_connection=mock.MagicMock(return_value=fake_conn))
+
+        results = module.list_pending_generation_tables(databases=["dwd"])
+
+        self.assertEqual(
+            results,
+            [
+                {
+                    "database": "dwd",
+                    "tbl": "dwd_has_metric_rule",
                     "dest_db": "dwd",
                     "rule_name": "cnt",
                     "status": "pending_generation",
